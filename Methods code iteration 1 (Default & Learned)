@@ -1,0 +1,88 @@
+import pandas as pd
+import numpy as np
+import os
+
+#Setup Filenames 
+POWER_CURVE_FILE = 'Copy of Deeping St Nicholas Power Curves.xlsx'
+TURBINE_FILES = [
+    'D T01 25-26.xlsx', 'D T02 25-26.xlsx', 'D T03 25-26.xlsx', 'D T04 25-26.xlsx', 
+    'D T05 25-26.xlsx', 'D T06 25-26.xlsx', 'D T07 25-26.xlsx', 'D T08 25-26.xlsx'
+]
+INTERVAL_HRS = 10 / 60 
+
+#User Selections
+print("--- Step 1: Select Turbine Dataset ---")
+for i, file_path in enumerate(TURBINE_FILES, 1):
+    print(f"[{i}] {file_path}")
+
+turbine_choice = int(input("\nSelect Turbine (1-8): ")) - 1
+selected_turbine_file = TURBINE_FILES[turbine_choice]
+
+print("\n--- Step 2: Select Power Curve ---")
+xl_power_curve = pd.ExcelFile(POWER_CURVE_FILE)
+sheet_names = xl_power_curve.sheet_names
+
+for i, sheet in enumerate(sheet_names, 1):
+    print(f"[{i}] {sheet}")
+
+pc_choice = int(input("Select Power Curve Sheet: ")) - 1
+selected_pc_sheet = sheet_names[pc_choice]
+
+#Loading Data
+df_turbine = pd.read_excel(selected_turbine_file, usecols="A,B,D", header=0)
+df_power_curve = pd.read_excel(POWER_CURVE_FILE, sheet_name=selected_pc_sheet, header=0)
+df_power_curve.columns = ['ws_ref', 'power_ref']
+
+#Timestamp Alignment
+timestamp_col = df_turbine.columns[0]
+ws_col_name = df_turbine.columns[1] 
+actual_pwr_col = df_turbine.columns[2]
+
+#Round turbine wind speed
+df_turbine['ws_rounded'] = df_turbine[ws_col_name].round(1)
+
+#Merge with power curve
+merged_df = pd.merge(df_turbine, df_power_curve, left_on='ws_rounded', right_on='ws_ref', how='left')
+
+#Cleaning data to remove NaN values
+merged_df['power_ref'] = merged_df['power_ref'].fillna(0)
+
+#Defining Turbines Running & Stopped
+is_running = merged_df[actual_pwr_col] > 0
+is_stopped = merged_df[actual_pwr_col] <= 0
+
+total_energy_produced = (merged_df.loc[is_running, 'power_ref'] * INTERVAL_HRS).sum()
+lost_energy_potential = (merged_df.loc[is_stopped, 'power_ref'] * INTERVAL_HRS)
+total_lost_energy = lost_energy_potential.sum()
+total_consumed_energy = (merged_df.loc[is_stopped, actual_pwr_col] * INTERVAL_HRS).sum()
+
+#Export tables to excel
+export_cols = [timestamp_col, 'ws_rounded', 'power_ref']
+df_on = merged_df.loc[is_running, export_cols].copy()
+df_off = merged_df.loc[is_stopped, export_cols].copy()
+
+#Format the timestamp
+df_on[timestamp_col] = pd.to_datetime(df_on[timestamp_col]).dt.strftime('%d-%m-%Y %H:%M')
+df_off[timestamp_col] = pd.to_datetime(df_off[timestamp_col]).dt.strftime('%d-%m-%Y %H:%M')
+
+output_filename = f"Analysis_{selected_turbine_file}"
+
+with pd.ExcelWriter(output_filename) as writer:
+    df_on.to_excel(writer, sheet_name='Turbine_ON', index=False)
+    df_off.to_excel(writer, sheet_name='Turbine_OFF', index=False)
+
+#Displaying results 
+print("\n" + "="*55)
+print(f"PERFORMANCE SUMMARY: {selected_turbine_file}")
+print(f"Reference Curve: {selected_pc_sheet}")
+print("="*55)
+print(f"{'Actual Energy Produced':<35} : {total_energy_produced:,.2f} kWh")
+print(f"{'Lost Production (Potential)':<35} : {total_lost_energy:,.2f} kWh")
+print(f"{'Parasitic/Consumed Energy':<35} : {total_consumed_energy:,.2f} kWh")
+print("-" * 55)
+print(f"{'Total Running Time':<35} : {is_running.sum() * INTERVAL_HRS:.1f} hrs")
+print(f"{'Total Stopped Time':<35} : {is_stopped.sum() * INTERVAL_HRS:.1f} hrs")
+print(f"{'Availability (Time)':<35} : {(is_running.sum() / len(merged_df)) * 100:.2f}%")
+print("-" * 55)
+print(f"Data exported to: {output_filename}")
+print("="*55)
