@@ -1,0 +1,56 @@
+import openpyxl
+from scipy.interpolate import interp1d
+import numpy as np
+
+#Load the workbook
+input_file = 'Deeping St Nicholas Power Curves.xlsx' 
+wb = openpyxl.load_workbook(input_file, data_only=True)
+
+#Display available sheets and lets user choose
+print("Available sheets:")
+for name in wb.sheetnames:
+    print(f" - {name}")
+
+target_sheet = input("\nWhich sheet would you like to process? ").strip()
+
+if target_sheet not in wb.sheetnames:
+    print(f"Error: '{target_sheet}' not found in workbook.")
+    exit()
+
+sheet = wb[target_sheet]
+
+#Extract data
+wind_speeds = []
+power_values = []
+
+for row in range(7, sheet.max_row + 1):
+    ws_val = sheet.cell(row=row, column=11).value # Column C
+    pwr_val = sheet.cell(row=row, column=12).value # Column D
+    
+    if ws_val is not None and isinstance(ws_val, (int, float)):
+        wind_speeds.append(float(ws_val))
+        power_values.append(float(pwr_val))
+
+#Interpolate (0 to 25 at 0.1 intervals)
+if len(wind_speeds) < 2:
+    print("Error: Not enough data points found in the selected sheet.")
+else:
+    f = interp1d(wind_speeds, power_values, kind='linear', fill_value="extrapolate")
+    
+    #251 points ensures 0.1 increments from 0 to 25
+    new_wind_speeds = np.linspace(0, 25, 251)
+    new_power_values = f(new_wind_speeds)
+
+    #Create the Output file
+    new_wb = openpyxl.Workbook()
+    new_ws = new_wb.active
+    new_ws.title = f"Interp_{target_sheet[:20]}" 
+    new_ws.append(["Wind Speed (m/s)", "Power (kW)"])
+
+    for ws, pwr in zip(new_wind_speeds, new_power_values):
+        actual_pwr = max(0, float(pwr)) 
+        new_ws.append([round(ws, 1), round(actual_pwr, 2)])
+    #saving the new file  
+    output_name = f"interpolated_{target_sheet}.xlsx"
+    new_wb.save(output_name)
+    print(f"\nSuccess! New file saved as: {output_name}")
