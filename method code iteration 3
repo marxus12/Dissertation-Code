@@ -46,7 +46,6 @@ def load_power_curve_sheet(power_curve_file, sheet_name):
     return power_curve_df
 
 def export_results_to_excel(analyzed_df, original_filename, timestamp_col, is_running_mask, is_stopped_mask):
-    """Exports the processed results into an Excel file with separate ON/OFF sheets."""
     export_columns = [timestamp_col, 'WS_Rounded', 'Power_Ref']
     
     #Create copies of data filtered by turbine state
@@ -59,7 +58,7 @@ def export_results_to_excel(analyzed_df, original_filename, timestamp_col, is_ru
     
     output_filename = f"Analysis_{original_filename}"
     
-    # Save both dataframes into one file using multiple sheets
+    #Save both dataframes into one file using multiple sheets
     with pd.ExcelWriter(output_filename) as excel_writer:
         running_data.to_excel(excel_writer, sheet_name='Turbine_ON', index=False)
         stopped_data.to_excel(excel_writer, sheet_name='Turbine_OFF', index=False)
@@ -80,22 +79,22 @@ def _get_active_only(dataframe, column_index):
     actual_power_values = dataframe.iloc[:, 2] # Index 2 is the Power column
     target_data_values = dataframe.iloc[:, column_index] 
     
-    # If Power <= 0, replace data with NaN (Not a Number) so it is ignored in averages
+    #If Power <= 0, replace data with NaN so it is ignored in averages
     return target_data_values.where(actual_power_values > 0, np.nan)
 
 def _build_wind_speed_streams(target_turbine_df, all_turbines_dict, neighbor_list):
     timestamp_column = target_turbine_df.columns[0]
     alignment_df = target_turbine_df[[timestamp_column]].copy()
     
-    # Tier 1: Target's own anemometer reading
+    #Tier 1: Target's own anemometer reading
     alignment_df['target'] = target_turbine_df.iloc[:, 1]
     
-    # Tier 2: Primary Neighbors (Average of those that are ON)
+    #Tier 2: Primary Neighbors (Average of those that are ON)
     primary_active = pd.concat([_get_active_only(all_turbines_dict[n], 1) for n in neighbor_list], axis=1).mean(axis=1)
     primary_raw = pd.concat([all_turbines_dict[n].iloc[:, 1] for n in neighbor_list], axis=1).mean(axis=1)
     alignment_df['primary'] = primary_active.combine_first(primary_raw)
     
-    # Tier 3: Secondary Farm (Average of all turbines that are ON)
+    #Tier 3: Secondary Farm (Average of all turbines that are ON)
     secondary_active = pd.concat([_get_active_only(df, 1) for df in all_turbines_dict.values()], axis=1).mean(axis=1)
     secondary_raw = pd.concat([df.iloc[:, 1] for df in all_turbines_dict.values()], axis=1).mean(axis=1)
     alignment_df['secondary'] = secondary_active.combine_first(secondary_raw)
@@ -109,18 +108,18 @@ def _run_standard_merge(target_turbine_df, power_curve_df, wind_speed_series):
     timestamp_col = target_turbine_df.columns[0]
     actual_power_col = target_turbine_df.columns[2]
     
-    # Round the input wind speed to match the 0.1 increments in the Power Curve table
+    #Round the input wind speed to match the 0.1 increments in the Power Curve table
     working_df['WS_Rounded'] = wind_speed_series.round(1)
     
-    # Merge telemetry with the reference curve; results in NaNs where wind doesn't match a row
+    #Merge telemetry with the reference curve;
     merged_results = pd.merge(working_df, power_curve_df, left_on='WS_Rounded', right_on='WS_Ref', how='left')
     
-    # Define Power ON & OFF states
+    #Define Power ON & OFF states
     is_running = merged_results[actual_power_col] > 0
     # treat NaNs (data gaps) as Stopped (True) so we calculate lost production for them
     is_stopped = (~is_running).fillna(True)
     
-    # Convert kW to kWh and sum. skipna=True ensures we calculate totals even if some rows are missing.
+    # Convert kW to kWh and sum
     metrics = {
         'produced': (merged_results.loc[is_running, 'Power_Ref'] * INTERVAL_HRS).sum(skipna=True),
         'lost': (merged_results.loc[is_stopped, 'Power_Ref'] * INTERVAL_HRS).sum(skipna=True),
@@ -136,7 +135,6 @@ def _calculate_direct_power_metrics(target_turbine_df, reference_power_series):
     timestamp_col = target_turbine_df.columns[0]
     actual_power_col = target_turbine_df.columns[2]
     
-    # No merge needed; we force the Reference Power to be the Neighbor Average
     results_df['Power_Ref'] = reference_power_series
     results_df['WS_Rounded'] = target_turbine_df.iloc[:, 1] 
     
@@ -154,7 +152,7 @@ def _calculate_direct_power_metrics(target_turbine_df, reference_power_series):
     return results_df, metrics, timestamp_col, is_running, is_stopped
 
 # Hierachy Methods 
-    def method_default_curve(df_target, df_pc, all_data, neighbors):
+def method_default_curve(df_target, df_pc, all_data, neighbors):
     streams = _build_wind_speed_streams(df_target, all_data, neighbors)
     final_ws = streams['target'].combine_first(streams['primary']).combine_first(streams['secondary'])
     return _run_standard_merge(df_target, df_pc, final_ws)
@@ -178,7 +176,7 @@ def method_primary_reference_power(df_target, all_data, neighbors, df_pc):
     primary_power = pd.concat([_get_active_only(all_data[n], 2) for n in neighbors], axis=1).mean(axis=1)
     secondary_power = pd.concat([_get_active_only(df, 2) for df in all_data.values()], axis=1).mean(axis=1)
     
-    # Last resort fallback: Model output from the learned PC
+    #Last resort fallback: Model output from the learned PC
     temp_df = df_target.copy()
     temp_df['WS_R'] = df_target.iloc[:, 1].round(1)
     pc_lookup = pd.merge(temp_df, df_pc, left_on='WS_R', right_on='WS_Ref', how='left')
@@ -253,13 +251,13 @@ def run_main_application():
         turbine_number = selected_file.split(' ')[1].replace('T','').lstrip('0')
         learned_sheet_name = f"Deeping T{turbine_number}"
 
-        # 2. Data Loading
-        # Load all data into a dictionary for neighbor-to-neighbor comparisons
+        #Data Loading
+        #Load all data into a dictionary for neighbor-to-neighbor comparisons
         all_turbine_data = {f: data_iob.load_turbine_data(f) for f in TURBINE_FILES}
         target_df = all_turbine_data[selected_file]
         neighbor_list = NEIGHBOR_MAP.get(selected_file)
 
-        # 3. Method Routing
+        #Method Routing
         if method_choice == 1:
             power_curve_df = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, "Default PC")
             results = processingb.method_default_curve(target_df, power_curve_df, all_turbine_data, neighbor_list)
@@ -290,10 +288,9 @@ def run_main_application():
             results = processingb.method_secondary_reference_power(target_df, all_turbine_data, power_curve_df)
             reference_label = "Secondary Pwr Avg (Filtered)"
 
-        # 4. Unpacking Results
         results_df, performance_metrics, timestamp_col, is_running, is_stopped = results
 
-        # 5. UI and File Output
+        #UI and File Output
         uib.display_results_summary(selected_file, reference_label, performance_metrics)
         export_path = data_iob.export_results_to_excel(results_df, selected_file, timestamp_col, is_running, is_stopped)
         print(f"File exported successfully to: {export_path}")
