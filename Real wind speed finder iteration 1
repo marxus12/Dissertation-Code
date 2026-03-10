@@ -1,0 +1,105 @@
+"""processing.py"""
+
+import pandas as pd
+import numpy as np
+
+def load_data(turbine_path, power_curve_path, met_mast_path, curve_sheet):
+    """
+    Opens files and filters out rows with NaN or Power <= 0 in Column E.
+    """
+    # 1. Load the raw turbine data
+    t1_data = pd.read_excel(turbine_path, engine='openpyxl')
+    
+    # 2. Filter: Column E (index 4) must be positive and not a number (NaN)
+    power_kw_col = t1_data.columns[4]
+    t1_data = t1_data.dropna(subset=[power_kw_col])
+    t1_data = t1_data[t1_data[power_kw_col] > 0].copy()
+    
+    # 3. Load Power Curve (specific sheet) and Met Mast
+    power_curve = pd.read_excel(power_curve_path, sheet_name=curve_sheet, engine='openpyxl')
+    met_mast = pd.read_excel(met_mast_path, engine='openpyxl')
+    
+    return t1_data, power_curve, met_mast
+
+def convert_energy_to_power(df):
+    """
+    Converts 'Energy Export (kWh)' in Column D (Index 3) to Power.
+    Formula: Power = Energy / (1/6)
+    """
+    energy_col = df.columns[3]
+    # Energy divided by 1/6 is the same as multiplying by 6
+    df['calculated_power'] = df[energy_col] * 6 
+    return df
+
+def find_closest_wind_speed(target_power, power_curve):
+    """
+    Lookup: Finds the wind speed in the learned curve closest to the calculated power.
+    Assumes Power Curve: Col A = Wind Speed, Col B = Power.
+    """
+    speed_col = power_curve.columns[0]
+    power_col = power_curve.columns[1]
+    
+    # Find the index of the closest power match using absolute difference
+    idx = (power_curve[power_col] - target_power).abs().idxmin()
+    return power_curve.loc[idx, speed_col]
+
+def process_turbine_analysis(turbine_file, curve_file, met_file, curve_sheet):
+    # Load and Clean
+    t1_data, power_curve, met_mast = load_data(turbine_file, curve_file, met_file, curve_sheet)
+    
+    # Transform Energy (Col D)
+    t1_data = convert_energy_to_power(t1_data)
+    
+    # Map to Wind Speed
+    t1_data['derived_wind_speed'] = t1_data['calculated_power'].apply(
+        lambda x: find_closest_wind_speed(x, power_curve)
+    )
+    
+    return t1_data, met_mast
+
+
+
+"""Main.py"""
+
+from Turbine_analyticsc.Processing import process_turbine_analysis
+import pandas as pd
+
+# Exact filenames from your project directory
+TURBINE_1_FILE = "D T01b 25-26.xlsx"
+POWER_CURVE_FILE = "Copy of Deeping St Nicholas Power Curves.xlsx" 
+MET_MAST_FILE = "Deeping met mast 2025-2026.xlsx"
+CURVE_SHEET_NAME = "Deeping T1" 
+
+def main():
+    try:
+        print(f"Starting analysis for {CURVE_SHEET_NAME}...")
+        
+        # Execute the modular workflow
+        results, met_data = process_turbine_analysis(
+            TURBINE_1_FILE, 
+            POWER_CURVE_FILE, 
+            MET_MAST_FILE,
+            CURVE_SHEET_NAME
+        )
+        
+        # Methodology verification
+        print("\n--- Cleaning and Processing Report ---")
+        print(f"Rows remaining after Power > 0 filter: {len(results)}")
+        
+        # Display sample of Date (Col 0), Energy (Col 3), and Results
+        preview_cols = [results.columns[0], results.columns[3], 'calculated_power', 'derived_wind_speed']
+        print("\n--- Results Preview ---")
+        print(results[preview_cols].head())
+        
+        # Save output for your dissertation results
+        output_file = "Deeping_T1_Analysis_Results.xlsx"
+        results.to_excel(output_file, index=False)
+        print(f"\nSuccess! Final data exported to {output_file}")
+
+    except FileNotFoundError as e:
+        print(f"File Error: Ensure all files are in the Wind_project3 folder. {e}")
+    except Exception as e:
+        print(f"Unexpected Error: {e}")
+
+if __name__ == "__main__":
+    main()
