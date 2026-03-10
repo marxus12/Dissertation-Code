@@ -172,29 +172,6 @@ def method_secondary_reference_pc(df_target, df_pc, all_data, neighbors):
     final_ws = streams['secondary'].combine_first(streams['target'])
     return _run_standard_merge(df_target, df_pc, final_ws)
 
-def method_primary_reference_power(df_target, all_data, neighbors, df_pc):
-    primary_power = pd.concat([_get_active_only(all_data[n], 2) for n in neighbors], axis=1).mean(axis=1)
-    secondary_power = pd.concat([_get_active_only(df, 2) for df in all_data.values()], axis=1).mean(axis=1)
-    
-    #Last resort fallback: Model output from the learned PC
-    temp_df = df_target.copy()
-    temp_df['WS_R'] = df_target.iloc[:, 1].round(1)
-    pc_lookup = pd.merge(temp_df, df_pc, left_on='WS_R', right_on='WS_Ref', how='left')
-    learned_power = pc_lookup['Power_Ref']
-    
-    final_power = primary_power.combine_first(secondary_power).combine_first(learned_power)
-    return _calculate_direct_power_metrics(df_target, final_power)
-
-def method_secondary_reference_power(df_target, all_data, df_pc):
-    secondary_power = pd.concat([_get_active_only(df, 2) for df in all_data.values()], axis=1).mean(axis=1)
-    
-    temp_df = df_target.copy()
-    temp_df['WS_R'] = df_target.iloc[:, 1].round(1)
-    pc_lookup = pd.merge(temp_df, df_pc, left_on='WS_R', right_on='WS_Ref', how='left')
-    learned_power = pc_lookup['Power_Ref']
-    
-    final_power = secondary_power.combine_first(learned_power)
-    return _calculate_direct_power_metrics(df_target, final_power)
 
 
 ###uib.py###
@@ -216,9 +193,7 @@ def select_analysis_method():
     print("[2] Learned PC (Own -> Primary -> Secondary)")
     print("[3] Primary Ref PC (Primary -> Secondary -> Own)")
     print("[4] Secondary Ref PC (Secondary -> Own)")
-    print("[5] Primary Ref Pwr (Primary -> Secondary -> Learned PC)")
-    print("[6] Secondary Ref Pwr (Secondary -> Learned PC)")
-    return int(input("Choice (1-6): "))
+    return int(input("Choice (1-4): "))
 
 def display_results_summary(turbine_name, reference_info, performance_metrics):
     print("\n" + "="*55)
@@ -278,15 +253,6 @@ def run_main_application():
             results = processingb.method_secondary_reference_pc(target_df, power_curve_df, all_turbine_data, neighbor_list)
             reference_label = "Secondary Ref PC (Filtered)"
             
-        elif method_choice == 5:
-            power_curve_df = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, learned_sheet_name)
-            results = processingb.method_primary_reference_power(target_df, all_turbine_data, neighbor_list, power_curve_df)
-            reference_label = "Primary Pwr Avg (Filtered)"
-            
-        elif method_choice == 6:
-            power_curve_df = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, learned_sheet_name)
-            results = processingb.method_secondary_reference_power(target_df, all_turbine_data, power_curve_df)
-            reference_label = "Secondary Pwr Avg (Filtered)"
 
         results_df, performance_metrics, timestamp_col, is_running, is_stopped = results
 
