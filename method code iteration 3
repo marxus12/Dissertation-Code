@@ -139,7 +139,7 @@ def _calculate_direct_power_metrics(target_turbine_df, reference_power_series):
     results_df['WS_Rounded'] = target_turbine_df.iloc[:, 1] 
     
     is_running = results_df[actual_power_col] > 0
-    is_stopped = (~is_running).fillna(True)
+    is_stopped = ~is_running
                
     metrics = {
         'produced': (results_df.loc[is_running, 'Power_Ref'] * INTERVAL_HRS).sum(skipna=True),
