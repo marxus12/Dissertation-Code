@@ -1,0 +1,312 @@
+"""Data_iob.py"""
+
+import pandas as pd
+
+# Function to load turbine Timestamp, Wind Speed, and Power
+def load_turbine_data(file_path):
+    # Only reads columns A, B, and D from the Excel file
+    return pd.read_excel(file_path, usecols="A,B,D", header=0)
+
+# Function to load a specific sheet from the Power Curve workbook
+def load_power_curve_sheet(power_curve_file, sheet_name):
+    # Opens the workbook to inspect sheet names
+    excel_object = pd.ExcelFile(power_curve_file)
+    # Checks if the user-selected sheet exists to prevent errors
+    if sheet_name not in excel_object.sheet_names:
+        raise ValueError(f"Sheet '{sheet_name}' not found.")
+    
+    # Reads the sheet and standardizes column names for merging
+    df_curve = pd.read_excel(excel_object, sheet_name=sheet_name, header=0)
+    df_curve.columns = ['WS_Ref', 'Power_Ref']
+    return df_curve
+
+# Function to save the processed results into a new Excel file
+def export_results_to_excel(analyzed_df, filename, timestamp_col, is_running, is_stopped):
+    # Defines which columns will be exported
+    export_cols = [timestamp_col, 'WS_Rounded', 'Power_Ref']
+    
+    # Separates data into 'ON' and 'OFF' dataframes based on turbine power
+    df_on = analyzed_df.loc[is_running, export_cols].copy()
+    df_off = analyzed_df.loc[is_stopped, export_cols].copy()
+    
+    # Standardizes the timestamp format for both dataframes
+    for frame in [df_on, df_off]:
+        frame[timestamp_col] = pd.to_datetime(frame[timestamp_col]).dt.strftime('%d-%m-%Y %H:%M')
+    
+    # Creates a filename with the 'Analysis_' prefix
+    output_name = f"Analysis_{filename}"
+    # Writes both ON and OFF results into separate sheets in one Excel file
+    with pd.ExcelWriter(output_name) as writer:
+        df_on.to_excel(writer, sheet_name='Turbine_ON', index=False)
+        df_off.to_excel(writer, sheet_name='Turbine_OFF', index=False)
+    return output_name
+
+
+"""Processingb.py"""
+
+import pandas as pd
+import numpy as np
+from configb import INTERVAL_HRS
+
+# --- HELPER FUNCTIONS ---
+
+# Returns data only if the turbine is ON; otherwise returns NaN to trigger fallbacks
+def _get_active_only_values(dataframe, column_index):
+    # Index 2 is always Power
+    power_values = dataframe.iloc[:, 2]
+    # column_index is either Wind Speed or Power
+    target_values = dataframe.iloc[:, column_index]
+    # Masks data: keeps value if power > 0, else sets to NaN
+    return target_values.where(power_values > 0, np.nan)
+
+# Prepares the different data sources (Tiers) for fallback logic
+def _prepare_wind_speed_tiers(target_df, all_data, neighbor_list):
+    # Captures the timestamp column for alignment
+    ts_col = target_df.columns[0]
+    tiers = target_df[[ts_col]].copy()
+    
+    # Tier 1: The turbine's own anemometer (0 is replaced with NaN if faulty)
+    tiers['target'] = target_df.iloc[:, 1].replace(0, np.nan)
+    
+    # Tier 2: Primary Neighbors (Average of active neighbors -> Fallback to raw average)
+    p_active = pd.concat([_get_active_only_values(all_data[n], 1) for n in neighbor_list], axis=1).mean(axis=1)
+    p_raw = pd.concat([all_data[n].iloc[:, 1] for n in neighbor_list], axis=1).mean(axis=1).replace(0, np.nan)
+    tiers['primary'] = p_active.combine_first(p_raw)
+    
+    # Tier 3: Secondary Farm (Average of all active turbines -> Fallback to raw farm average)
+    s_active = pd.concat([_get_active_only_values(df, 1) for df in all_data.values()], axis=1).mean(axis=1)
+    s_raw = pd.concat([df.iloc[:, 1] for df in all_data.values()], axis=1).mean(axis=1).replace(0, np.nan)
+    tiers['secondary'] = s_active.combine_first(s_raw)
+    
+    return tiers
+
+# --- CORE CALCULATION ENGINES ---
+
+# Matches the chosen wind hierarchy to the Excel Power Curve
+def _execute_curve_merge(target_df, power_curve_df, hierarchical_ws):
+    analysis_df = target_df.copy()
+    ts_col, actual_pwr_col = target_df.columns[0], target_df.columns[2]
+    
+    # Rounds wind speed to 0.1 increments to match Power Curve rows
+    analysis_df['WS_Rounded'] = hierarchical_ws.round(1)
+    # Joins the telemetry with the power curve lookup table
+    merged_results = pd.merge(analysis_df, power_curve_df, left_on='WS_Rounded', right_on='WS_Ref', how='left')
+    
+    # Identifies rows where turbine is actually generating power
+    is_run = merged_results[actual_pwr_col] > 0
+    # Treats data gaps and 0s as Stopped (True) for potential loss calculation
+    is_stop = (~is_run).fillna(True)
+    
+    # Aggregates totals using the 10-minute interval
+    metrics = {
+        'produced': (merged_results.loc[is_run, 'Power_Ref'] * INTERVAL_HRS).sum(skipna=True),
+        'lost': (merged_results.loc[is_stop, 'Power_Ref'] * INTERVAL_HRS).sum(skipna=True),
+        'consumed': (merged_results.loc[is_stop, actual_pwr_col] * INTERVAL_HRS).sum(skipna=True),
+        'run_time': is_run.sum() * INTERVAL_HRS,
+        'stop_time': is_stop.sum() * INTERVAL_HRS,
+        'avail': (is_run.sum() / len(merged_results)) * 100 if len(merged_results) > 0 else 0
+    }
+    return merged_results, metrics, ts_col, is_run, is_stop
+
+# Calculates metrics using direct Power (kW) data instead of Wind Speed
+def _execute_power_metrics(target_df, reference_power_stream):
+    analysis_df = target_df.copy()
+    ts_col, actual_pwr_col = target_df.columns[0], target_df.columns[2]
+    
+    # Forces 'Power_Ref' to be the neighbor/farm power average
+    analysis_df['Power_Ref'] = reference_power_stream
+    analysis_df['WS_Rounded'] = target_df.iloc[:, 1]
+    
+    is_run = analysis_df[actual_pwr_col] > 0
+    is_stop = (~is_run).fillna(True)
+    
+    metrics = {
+        'produced': (analysis_df.loc[is_run, 'Power_Ref'] * INTERVAL_HRS).sum(skipna=True),
+        'lost': (analysis_df.loc[is_stop, 'Power_Ref'] * INTERVAL_HRS).sum(skipna=True),
+        'consumed': (analysis_df.loc[is_stop, actual_pwr_col] * INTERVAL_HRS).sum(skipna=True),
+        'run_time': is_run.sum() * INTERVAL_HRS,
+        'stop_time': is_stop.sum() * INTERVAL_HRS,
+        'avail': (is_run.sum() / len(analysis_df)) * 100 if len(analysis_df) > 0 else 0
+    }
+    return analysis_df, metrics, ts_col, is_run, is_stop
+
+# --- UNIQUE METHOD HIERARCHIES ---
+
+# Method 1 & 2: Trust local anemometer first
+def method_default_curve(df_target, df_pc, all_data, neighbors):
+    t = _prepare_wind_speed_tiers(df_target, all_data, neighbors)
+    ws = t['target'].combine_first(t['primary']).combine_first(t['secondary'])
+    return _execute_curve_merge(df_target, df_pc, ws)
+
+def method_learned_curve(df_target, df_pc, all_data, neighbors):
+    t = _prepare_wind_speed_tiers(df_target, all_data, neighbors)
+    ws = t['target'].combine_first(t['primary']).combine_first(t['secondary'])
+    return _execute_curve_merge(df_target, df_pc, ws)
+
+# Method 3: Trust neighbors first, then farm, then local anemometer
+def method_primary_ref_pc(df_target, df_pc, all_data, neighbors):
+    t = _prepare_wind_speed_tiers(df_target, all_data, neighbors)
+    ws = t['primary'].combine_first(t['secondary']).combine_first(t['target'])
+    return _execute_curve_merge(df_target, df_pc, ws)
+
+# Method 4: Trust farm average first, then local anemometer
+def method_secondary_ref_pc(df_target, df_pc, all_data, neighbors):
+    t = _prepare_wind_speed_tiers(df_target, all_data, neighbors)
+    ws = t['secondary'].combine_first(t['target'])
+    return _execute_curve_merge(df_target, df_pc, ws)
+
+# Method 5: Reference power from neighbors -> farm -> learned curve theoretical output
+def method_primary_ref_power(df_target, all_data, neighbors, df_pc):
+    p_pwr = pd.concat([_get_active_only_values(all_data[n], 2) for n in neighbors], axis=1).mean(axis=1)
+    s_pwr = pd.concat([_get_active_only_values(df, 2) for df in all_data.values()], axis=1).mean(axis=1)
+    # Theoretical fallback merge
+    temp = df_target.copy()
+    temp['WS_R'] = df_target.iloc[:, 1].round(1)
+    pc_lookup = pd.merge(temp, df_pc, left_on='WS_R', right_on='WS_Ref', how='left')
+    theoretical = pc_lookup['Power_Ref']
+    # Tiered fallback
+    final_pwr = p_pwr.combine_first(s_pwr).combine_first(theoretical)
+    return _execute_power_metrics(df_target, final_pwr)
+
+# Method 6: Reference power from farm average -> learned curve theoretical output
+def method_secondary_ref_power(df_target, all_data, df_pc):
+    s_pwr = pd.concat([_get_active_only_values(df, 2) for df in all_data.values()], axis=1).mean(axis=1)
+    # Theoretical fallback merge
+    temp = df_target.copy()
+    temp['WS_R'] = df_target.iloc[:, 1].round(1)
+    pc_lookup = pd.merge(temp, df_pc, left_on='WS_R', right_on='WS_Ref', how='left')
+    theoretical = pc_lookup['Power_Ref']
+    # Tiered fallback
+    final_pwr = s_pwr.combine_first(theoretical)
+    return _execute_power_metrics(df_target, final_pwr)
+
+"""uib.py"""
+
+
+from configb import TURBINE_FILES
+
+# Function to handle turbine file selection
+def select_turbine_dataset():
+    print("\n--- Turbine Selection ---")
+    for idx, f in enumerate(TURBINE_FILES, 1):
+        print(f"[{idx}] {f}")
+    # Returns the filename based on user input index
+    return TURBINE_FILES[int(input("Selection (1-8): ")) - 1]
+
+# Function to handle calculation method selection
+def select_analysis_method():
+    print("\n--- Methods & Fallback Hierarchies ---")
+    print("[1] Default PC (Local -> Primary -> Secondary)")
+    print("[2] Learned PC (Local -> Primary -> Secondary)")
+    print("[3] Primary Ref PC (Primary -> Secondary -> Local)")
+    print("[4] Secondary Ref PC (Secondary -> Local)")
+    print("[5] Primary Ref Pwr (Primary -> Secondary -> Learned PC)")
+    print("[6] Secondary Ref Pwr (Secondary -> Learned PC)")
+    # Returns 1-6
+    return int(input("Choice (1-6): "))
+
+# Function to print the final data summary to the terminal
+def display_performance_results(turbine, source, m):
+    print("\n" + "="*55)
+    print(f"PERFORMANCE SUMMARY: {turbine}")
+    print(f"Calculation Basis: {source}")
+    print("="*55)
+    print(f"{'Produced Energy':<30}: {m['produced']:,.2f} kWh")
+    print(f"{'Lost Potential':<30}: {m['lost']:,.2f} kWh")
+    print(f"{'Consumed Energy':<30}: {m['consumed']:,.2f} kWh")
+    print("-" * 55)
+    print(f"{'Run / Stop Hours':<30}: {m['run_time']:.1f}h / {m['stop_time']:.1f}h")
+    print(f"{'Total Availability':<30}: {m['avail']:.2f}%")
+    print("="*55)
+
+
+"""Configb.py"""
+
+# Path to the Excel workbook containing all Power Curve data sheets
+POWER_CURVE_FILE = 'Copy of Deeping St Nicholas Power Curves.xlsx'
+
+# List of the individual turbine telemetry data files to be processed
+TURBINE_FILES = [
+    'D T01 25-26.xlsx', 'D T02 25-26.xlsx', 'D T03 25-26.xlsx', 'D T04 25-26.xlsx', 
+    'D T05 25-26.xlsx', 'D T06 25-26.xlsx', 'D T07 25-26.xlsx', 'D T08 25-26.xlsx'
+]
+
+# 10-minute interval expressed as a fraction of an hour (10/60)
+# This is used to convert Power (kW) into Energy (kWh)
+INTERVAL_HRS = 10 / 60
+
+# Dictionary mapping each turbine to its two closest neighbors
+# This defines the "Primary" tier for the fallback logic
+NEIGHBOR_MAP = {
+    'D T01 25-26.xlsx': ['D T02 25-26.xlsx', 'D T03 25-26.xlsx'],
+    'D T02 25-26.xlsx': ['D T01 25-26.xlsx', 'D T03 25-26.xlsx'],
+    'D T03 25-26.xlsx': ['D T02 25-26.xlsx', 'D T04 25-26.xlsx'],
+    'D T04 25-26.xlsx': ['D T03 25-26.xlsx', 'D T05 25-26.xlsx'],
+    'D T05 25-26.xlsx': ['D T04 25-26.xlsx', 'D T03 25-26.xlsx'],
+    'D T06 25-26.xlsx': ['D T07 25-26.xlsx', 'D T08 25-26.xlsx'],
+    'D T07 25-26.xlsx': ['D T06 25-26.xlsx', 'D T08 25-26.xlsx'],
+    'D T08 25-26.xlsx': ['D T07 25-26.xlsx', 'D T06 25-26.xlsx'],
+}
+
+"""Mainb.py"""
+
+from configb import POWER_CURVE_FILE, TURBINE_FILES, NEIGHBOR_MAP
+from turbine_analyticsb import uib, data_iob, processingb
+
+# Main application orchestrator
+def run_application():
+    try:
+        # Step 1: Selection
+        file_name = uib.select_turbine_dataset()
+        method_idx = uib.select_analysis_method()
+        
+        # Step 2: Determine Sheet Name (Dynamic sheet selection for Learned PCs)
+        t_id = file_name.split(' ')[1].replace('T','').lstrip('0')
+        learned_sheet = f"Deeping T{t_id}"
+
+        # Step 3: Load Data for all turbines into a dictionary
+        all_data = {f: data_iob.load_turbine_data(f) for f in TURBINE_FILES}
+        target_df = all_data[file_name]
+        neighbors = NEIGHBOR_MAP.get(file_name)
+
+        # Step 4: Routing based on Method Index
+        if method_idx == 1:
+            pc = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, "Default PC")
+            res = processingb.method_default_curve(target_df, pc, all_data, neighbors)
+            info = "Default PC (Local Priority)"
+        elif method_idx == 2:
+            pc = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, learned_sheet)
+            res = processingb.method_learned_curve(target_df, pc, all_data, neighbors)
+            info = f"{learned_sheet} (Local Priority)"
+        elif method_idx == 3:
+            pc = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, learned_sheet)
+            res = processingb.method_primary_ref_pc(target_df, pc, all_data, neighbors)
+            info = "Primary Neighbors (WS Priority)"
+        elif method_idx == 4:
+            pc = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, learned_sheet)
+            res = processingb.method_secondary_ref_pc(target_df, pc, all_data, neighbors)
+            info = "Farm Average (WS Priority)"
+        elif method_idx == 5:
+            pc = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, learned_sheet)
+            res = processingb.method_primary_ref_power(target_df, all_data, neighbors, pc)
+            info = "Primary Neighbors (kW Priority)"
+        elif method_idx == 6:
+            pc = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, learned_sheet)
+            res = processingb.method_secondary_ref_power(target_df, all_data, pc)
+            info = "Farm Average (kW Priority)"
+
+        # Step 5: Unpacking and Output
+        final_df, metrics, ts_col, is_run, is_stop = res
+        uib.display_performance_results(file_name, info, metrics)
+        
+        # Step 6: File Export
+        out_path = data_iob.export_results_to_excel(final_df, file_name, ts_col, is_run, is_stop)
+        print(f"Exported to: {out_path}")
+
+    except Exception as e:
+        # Error handling for file paths or excel formatting issues
+        print(f"Execution Error: {e}")
+
+# Entry point trigger
+if __name__ == "__main__":
+    run_application()
