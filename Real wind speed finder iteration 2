@@ -1,0 +1,78 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import linregress
+
+# 1. Setup and Load Mast Data
+mast_file = 'Deeping MS 24-26.xlsx'
+df_mast = pd.read_excel(mast_file, usecols=[0, 2, 3])
+df_mast.columns = ['Timestamp', 'Mast_WS', 'Mast_WD']
+df_mast['Timestamp'] = pd.to_datetime(df_mast['Timestamp'])
+df_mast = df_mast.set_index('Timestamp')
+
+# 2. Define 30-degree bins
+bins = np.arange(0, 390, 30)
+labels = [f"{i}-{i+30}" for i in range(0, 360, 30)]
+
+all_results = []
+
+# 3. Process Turbines T1 through T8
+turbine_files = [f'Deeping T{i} 24-26.xlsx' for i in range(1, 9)]
+
+for t_file in turbine_files:
+    try:
+        # Load Turbine Data: A=Timestamp, B=WS, C=Power
+        df_turb = pd.read_excel(t_file, usecols=[0, 1, 2])
+        df_turb.columns = ['Timestamp', 'Turb_WS', 'Power']
+        df_turb['Timestamp'] = pd.to_datetime(df_turb['Timestamp'])
+        df_turb = df_turb.set_index('Timestamp')
+
+        # Filter: Power >= 0 and not NaN
+        df_turb = df_turb.dropna(subset=['Power'])
+        df_turb = df_turb[df_turb['Power'] >= 0]
+
+        # Sync data
+        combined = pd.merge(df_mast, df_turb, left_index=True, right_index=True).dropna()
+        
+        # Sectorize
+        combined['Sector'] = pd.cut(combined['Mast_WD'], bins=bins, labels=labels, right=False)
+
+        # 4. Loop through sectors
+        for sector, data in combined.groupby('Sector', observed=True):
+            if len(data) > 15:  # Minimum data points for statistical significance
+                slope, intercept, r_val, p_val, std_err = linregress(data['Mast_WS'], data['Turb_WS'])
+                
+                all_results.append({
+                    'Turbine': f'T{t_file.split(" T")[1][0]}', # Extracts 'T1', 'T2' etc.
+                    'Sector': sector,
+                    'Slope': round(slope, 4),
+                    'R2': round(r_val**2, 4),
+                    'Count': len(data)
+                })
+
+    except Exception as e:
+        print(f"Error processing {t_file}: {e}")
+
+# 5. Create Comparison Tables
+df_final = pd.DataFrame(all_results)
+
+# Pivot for Correction Factors
+slope_pivot = df_final.pivot(index='Sector', columns='Turbine', values='Slope')
+
+# Pivot for R-Squared values
+r2_pivot = df_final.pivot(index='Sector', columns='Turbine', values='R2')
+
+# Pivot for Data Point Counts
+count_pivot = df_final.pivot(index='Sector', columns='Turbine', values='Count')
+
+print("\n=== TABLE 1: CORRECTION FACTORS (SLOPES) ===")
+print(slope_pivot)
+
+print("\n=== TABLE 2: R-SQUARED VALUES (RELIABILITY) ===")
+print(r2_pivot)
+
+print("\n=== TABLE 3: DATA POINT COUNT PER BIN ===")
+print("Check this to ensure statistical significance")
+print(count_pivot)
+
+# Optional: Find the total amount of data used after all filtering
+print(f"\nTotal usable timestamps across all turbines: {df_final['Count'].sum()}")
