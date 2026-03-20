@@ -1,0 +1,110 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import linregress
+import os
+
+# --- 1. CONFIGURATION ---
+mast_file = 'Deeping MS 24-26.xlsx'
+turbine_files = [f'Deeping T{i} 24-26.xlsx' for i in range(1, 9)]
+output_folder = 'Turbine_Corrected_Reports'
+
+# Sector Analysis Settings
+bins = np.arange(0, 390, 30)
+labels = [f"{i}-{i+30}" for i in range(0, 360, 30)]
+
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+def main():
+    # --- 2. LOAD MAST DATA ---
+    print("Loading Met Mast data...")
+    try:
+        df_mast = pd.read_excel(mast_file, usecols=[0, 2, 3])
+        df_mast.columns = ['Timestamp', 'Mast_WS', 'Mast_WD']
+        df_mast['Timestamp'] = pd.to_datetime(df_mast['Timestamp'])
+        df_mast = df_mast.set_index('Timestamp')
+        # Standardize 360 degrees to 0
+        df_mast['Mast_WD'] = df_mast['Mast_WD'].replace(360, 0)
+    except Exception as e:
+        print(f"Critical Error loading Mast File: {e}")
+        return
+
+    # --- 3. PROCESS EACH TURBINE ---
+    for t_file in turbine_files:
+        t_id = f"T{t_file.split(' T')[1][0]}"
+        
+        if not os.path.exists(t_file):
+            print(f"Skipping {t_id}: File not found.")
+            continue
+            
+        print(f"Processing {t_id}...")
+        
+        try:
+            # Load Turbine Data
+            df_turb = pd.read_excel(t_file, usecols=[0, 1, 2])
+            df_turb.columns = ['Timestamp', 'Turb_WS', 'Power']
+            df_turb['Timestamp'] = pd.to_datetime(df_turb['Timestamp'])
+            df_turb = df_turb.set_index('Timestamp')
+
+            # Merge with Mast for Sector Alignment
+            # Inner join ensures we only calculate where both datasets exist
+            combined = pd.merge(df_turb, df_mast, left_index=True, right_index=True, how='inner').dropna()
+            
+            # Categorize into 30-degree sectors
+            combined['Sector'] = pd.cut(combined['Mast_WD'], bins=bins, labels=labels, right=False)
+
+            corrected_segments = []
+            correction_log = []
+
+            # --- 4. SECTORIZED CORRECTION LOGIC ---
+            for sector, data in combined.groupby('Sector', observed=True):
+                if len(data) > 15:
+                    # Linear Regression: Turbine_WS = (Mast_WS * Slope) + Intercept
+                    slope, intercept, r_val, p_val, std_err = linregress(data['Mast_WS'], data['Turb_WS'])
+                    r2 = r_val**2
+                    
+                    # Apply "Gold Standard" Filter (R^2 > 0.95)
+                    if r2 > 0.95:
+                        seg = data.copy()
+                        # Apply correction formula
+                        seg['Adjusted_WS'] = (seg['Mast_WS'] * slope) + intercept
+                        corrected_segments.append(seg)
+                        
+                        # Store metadata for the second sheet
+                        correction_log.append({
+                            'Sector': sector,
+                            'R2': round(r2, 4),
+                            'Slope': round(slope, 4),
+                            'Intercept': round(intercept, 4),
+                            'Data_Points': len(seg)
+                        })
+
+            # --- 5. GENERATE INDIVIDUAL EXCEL FILE ---
+            if corrected_segments:
+                # Combine all valid sectors back together
+                final_df = pd.concat(corrected_segments).sort_index().reset_index()
+                
+                # Filter/Order columns as requested
+                output_cols = ['Timestamp', 'Mast_WS', 'Turb_WS', 'Adjusted_WS', 'Power']
+                final_output = final_df[output_cols]
+                
+                file_name = f"{t_id}_Corrected_Analysis.xlsx"
+                full_path = os.path.join(output_folder, file_name)
+                
+                with pd.ExcelWriter(full_path) as writer:
+                    final_output.to_excel(writer, sheet_name='Corrected_Data', index=False)
+                    pd.DataFrame(correction_log).to_excel(writer, sheet_name='Correction_Factors', index=False)
+                
+                print(f"  -> Successfully saved {len(final_output)} rows to {file_name}")
+            else:
+                print(f"  -> No sectors for {t_id} met the R2 > 0.95 requirement.")
+
+        except Exception as e:
+            print(f"  -> Error processing {t_id}: {e}")
+
+    print("\n" + "="*40)
+    print(f"DONE: Reports generated in '{output_folder}'")
+    print("="*40)
+
+if __name__ == "__main__":
+    main()
