@@ -1,0 +1,128 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import linregress
+import os
+
+# --- 1. CONFIGURATION ---
+mast_file = 'Deeping MS 24-26.xlsx'
+turbine_files = [f'Deeping T{i} 24-26.xlsx' for i in range(1, 9)]
+
+# Define 30-degree bins for sector analysis
+bins = np.arange(0, 390, 30)
+labels = [f"{i}-{i+30}" for i in range(0, 360, 30)]
+
+all_stats = []
+availability_report = []
+
+# --- 2. LOAD MAST DATA ---
+print("Loading Met Mast data...")
+df_mast = pd.read_excel(mast_file, usecols=[0, 2, 3])
+df_mast.columns = ['Timestamp', 'Mast_WS', 'Mast_WD']
+df_mast['Timestamp'] = pd.to_datetime(df_mast['Timestamp'])
+df_mast = df_mast.set_index('Timestamp')
+
+# --- 3. PROCESS TURBINES ---
+for t_file in turbine_files:
+    if not os.path.exists(t_file):
+        continue
+    
+    print(f"Analyzing {t_file}...")
+    try:
+        # Load Turbine Data
+        df_turb = pd.read_excel(t_file, usecols=[0, 1, 2])
+        df_turb.columns = ['Timestamp', 'Turb_WS', 'Power']
+        df_turb['Timestamp'] = pd.to_datetime(df_turb['Timestamp'])
+        df_turb = df_turb.set_index('Timestamp')
+
+        # FILTER: Keep only operational data (Power >= 0)
+        df_turb_on = df_turb[df_turb['Power'] > 0].dropna(subset=['Power'])
+
+        # --- PART A: AVAILABILITY CHECK ---
+        # Join 'left' to see how many mast values are missing while turbine was on
+        avail_merge = pd.merge(df_turb_on, df_mast, left_index=True, right_index=True, how='left')
+        total_on = len(avail_merge)
+        missing_mast = avail_merge['Mast_WS'].isna().sum()
+        
+        availability_report.append({
+            'Turbine': f'T{t_file.split(" T")[1][0]}',
+            'Total_ON_Periods': total_on,
+            'Missing_Mast_Data': missing_mast,
+            'Availability_%': round(((total_on - missing_mast) / total_on) * 100, 2)
+        })
+
+        # --- PART B: CORRELATION & MAE ---
+        # Inner join (removes all NaNs automatically for the math)
+        combined = pd.merge(df_mast, df_turb_on, left_index=True, right_index=True).dropna()
+
+        # FIX: Align 360 degrees to 0 so counts match Excel logic
+        combined['Mast_WD'] = combined['Mast_WD'].replace(360, 0)
+        
+        # SECTORIZE
+        combined['Sector'] = pd.cut(combined['Mast_WD'], bins=bins, labels=labels, right=False)
+
+        for sector, data in combined.groupby('Sector', observed=True):
+            if len(data) > 15:
+                # Linear Regression
+                slope, intercept, r_val, p_val, std_err = linregress(data['Mast_WS'], data['Turb_WS'])
+                
+                # Accuracy Metrics
+                predicted_ws = (data['Mast_WS'] * slope) + intercept
+                mae = np.abs(data['Turb_WS'] - predicted_ws).mean()
+                
+                all_stats.append({
+                    'Turbine': f'T{t_file.split(" T")[1][0]}',
+                    'Sector': sector,
+                    'Slope': round(slope, 4),
+                    'R2': round(r_val**2, 4),
+                    'MAE_mps': round(mae, 4),
+                    'Count': len(data)
+                })
+
+    except Exception as e:
+        print(f"Error processing {t_file}: {e}")
+
+# --- 4. FINAL OUTPUTS ---
+df_avail = pd.DataFrame(availability_report)
+df_results = pd.DataFrame(all_stats)
+
+print("\n" + "="*60)
+print("PHASE 1: DATA AVAILABILITY REPORT")
+print("Shows if the mast was offline while the turbine was running.")
+print("="*60)
+print(df_avail.to_string(index=False))
+
+# Create pivot tables
+mae_pivot = df_results.pivot(index='Sector', columns='Turbine', values='MAE_mps')
+r2_pivot = df_results.pivot(index='Sector', columns='Turbine', values='R2')
+slope_pivot = df_results.pivot(index='Sector', columns='Turbine', values='Slope')
+count_pivot = df_results.pivot(index='Sector', columns='Turbine', values='Count')
+
+print("\n" + "="*60)
+print("PHASE 2: SECTORIZED CORRECTION & ACCURACY")
+print("="*60)
+print("\nTABLE: R-SQUARED (RELIABILITY)")
+print(r2_pivot)
+
+print("\nTABLE: MEAN ABSOLUTE ERROR (m/s)")
+print(mae_pivot)
+
+print("\nTABLE: DATA POINT COUNTS")
+print(count_pivot)
+
+# --- 5. GOLD STANDARD FILTER (R2 > 0.95) ---
+print("\n" + "="*60)
+print("PHASE 3: RECOMMENDED TEST SECTORS (R2 > 0.95)")
+print("="*60)
+gold = df_results[df_results['R2'] > 0.95].sort_values(by=['MAE_mps', 'R2'], ascending=[True, False])
+print(gold[['Turbine', 'Sector', 'R2', 'MAE_mps', 'Count']].head(15).to_string(index=False))
+
+# --- 6. EXCEL EXPORT ---
+with pd.ExcelWriter('Wind_Analysis_Results.xlsx') as writer:
+    df_avail.to_excel(writer, sheet_name='Availability')
+    slope_pivot.to_excel(writer, sheet_name='Correction_Factors')
+    r2_pivot.to_excel(writer, sheet_name='R_Squared')
+    mae_pivot.to_excel(writer, sheet_name='MAE_Accuracy')
+    count_pivot.to_excel(writer, sheet_name='Counts')
+    gold.to_excel(writer, sheet_name='Gold_Standard')
+
+print("\nAll results saved to 'Wind_Analysis_Results.xlsx'")
