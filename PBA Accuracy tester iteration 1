@@ -1,0 +1,100 @@
+import pandas as pd
+import numpy as np
+import os
+
+# --- 1. CONFIGURATION ---
+your_analysis_file = 'Final_Combined_Power_Analysis.xlsx'
+output_file = 'Turbine_Detailed_PBA_Energy_Report.xlsx'
+
+reference_sheets = [
+    '1_Default_PC', '2_Learned_PC', '3_Primary_WS_Ref', 
+    '4_Farm_WS_Ref', '5_Primary_kW_Ref', '6_Farm_kW_Ref'
+]
+
+def main():
+    if not os.path.exists(your_analysis_file):
+        print(f"Error: {your_analysis_file} not found.")
+        return
+
+    pba_summary = []
+
+    try:
+        with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+            for t_idx in range(1, 9):
+                t_id_short = f'T{t_idx}'
+                t_id_long = f'T{t_idx:02}'
+                master_file = f'Full_Analysis_D {t_id_long} 24-26.xlsx'
+                
+                if not os.path.exists(master_file):
+                    print(f"Skipping {t_id_long}: Master file {master_file} not found.")
+                    continue
+
+                try:
+                    print(f"Processing PBA & Energy for {t_id_short}...")
+                    
+                    # --- STEP 1: LOAD ANALYSIS DATA ---
+                    df_calc = pd.read_excel(your_analysis_file, sheet_name=t_id_short, usecols=[0, 1, 3])
+                    df_calc.columns = ['Timestamp_A', 'Actual_Pwr_ColB', 'Potential_Ref_ColD']
+                    df_calc['Timestamp_A'] = pd.to_datetime(df_calc['Timestamp_A'], dayfirst=True, errors='coerce')
+                    df_calc['Actual_Energy_ColB'] = df_calc['Actual_Pwr_ColB'] * (10/60)
+
+                    turbine_results = {'Turbine': t_id_short}
+
+                    # --- STEP 2: PROCESS AGAINST MASTER REFERENCE SHEETS ---
+                    for ref_sheet in reference_sheets:
+                        df_master = pd.read_excel(master_file, sheet_name=ref_sheet, usecols=[0, 1, 2])
+                        df_master.columns = ['TS_Master', 'Master_Pwr_ColB', 'Master_Pwr_ColC']
+                        df_master['TS_Master'] = pd.to_datetime(df_master['TS_Master'], dayfirst=True, errors='coerce')
+                        
+                        # ALIGN TIMESTAMPS
+                        merged = pd.merge(df_calc, df_master, left_on='Timestamp_A', right_on='TS_Master', how='inner')
+
+                        if not merged.empty:
+                            is_on = (merged['Master_Pwr_ColB'] > 0)
+                            is_off = (merged['Master_Pwr_ColB'] <= 0) | (merged['Master_Pwr_ColB'].isna())
+
+                            # --- TRUE METHOD CALCULATIONS (Col B & Col D) ---
+                            # Only calculate "True" once per turbine (using the first available reference sheet for alignment)
+                            if 'True_PBA_%' not in turbine_results:
+                                true_export = merged.loc[is_on, 'Actual_Energy_ColB'].sum()
+                                true_lost = (merged.loc[is_off, 'Potential_Ref_ColD'] * (10/60)).sum()
+                                
+                                turbine_results['True_PBA_%'] = round((true_export / (true_export + true_lost) * 100), 2) if (true_export + true_lost) > 0 else 0
+                                turbine_results['True_Export_kWh'] = round(true_export, 2)
+                                turbine_results['True_Lost_Prod_kWh'] = round(true_lost, 2)
+
+                            # --- REFERENCE METHOD CALCULATIONS (Master Col B & Col C) ---
+                            ref_export = (merged.loc[is_on, 'Master_Pwr_ColB'] * (10/60)).sum()
+                            ref_lost = (merged.loc[is_off, 'Master_Pwr_ColC'] * (10/60)).sum()
+                            
+                            pba_val = (ref_export / (ref_export + ref_lost) * 100) if (ref_export + ref_lost) > 0 else 0
+                            
+                            turbine_results[f'{ref_sheet}_PBA_%'] = round(pba_val, 2)
+                            turbine_results[f'{ref_sheet}_Export_kWh'] = round(ref_export, 2)
+                            turbine_results[f'{ref_sheet}_Lost_Prod_kWh'] = round(ref_lost, 2)
+
+                    pba_summary.append(turbine_results)
+                    
+                except Exception as e:
+                    print(f"  -> Error on {t_id_short}: {e}")
+
+            if pba_summary:
+                final_df = pd.DataFrame(pba_summary)
+                final_df.to_excel(writer, sheet_name='Detailed_PBA_Energy', index=False)
+                
+                # Apply Formatting for readability
+                workbook = writer.book
+                worksheet = writer.sheets['Detailed_PBA_Energy']
+                header_format = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
+                
+                for col_num, value in enumerate(final_df.columns.values):
+                    worksheet.write(0, col_num, value, header_format)
+                    worksheet.set_column(col_num, col_num, 18)
+
+                print(f"\nDone! Comprehensive report saved to '{output_file}'")
+
+    except PermissionError:
+        print(f"\nCRITICAL ERROR: Please close '{output_file}' in Excel and run again.")
+
+if __name__ == "__main__":
+    main()
