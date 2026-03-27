@@ -1,0 +1,74 @@
+import pandas as pd
+import os
+
+# --- 1. CONFIGURATION ---
+input_folder = 'Turbine_Corrected_Reports'
+power_curve_file = 'Deeping St Nicholas Power curves.xlsx'
+output_filename = 'Final_Combined_Power_Analysis.xlsx'
+
+# List of turbines to match your files (T1 through T8)
+turbine_ids = [f'T{i}' for i in range(1, 9)]
+
+def main():
+    if not os.path.exists(power_curve_file):
+        print(f"Error: Power curve file '{power_curve_file}' not found.")
+        return
+
+    # Prepare the writer for the final consolidated Excel file
+    with pd.ExcelWriter(output_filename, engine='xlsxwriter') as writer:
+        
+        for t_id in turbine_ids:
+            analysis_file = os.path.join(input_folder, f'{t_id}_Corrected_Analysis.xlsx')
+            pc_sheet_name = f'Deeping {t_id}' 
+            
+            if not os.path.exists(analysis_file):
+                print(f"Skipping {t_id}: Analysis file not found.")
+                continue
+
+            try:
+                print(f"Processing {t_id}...")
+                
+                # A. Load Turbine Analysis Data 
+                df_turb = pd.read_excel(analysis_file, sheet_name='Corrected_Data')
+                
+                # B. Create the rounded Wind Speed from Column D (Adjusted_WS)
+                df_turb['Lookup_WS'] = df_turb['Adjusted_WS'].round(1)
+
+                # C. Load the specific Power Curve sheet for this turbine
+                df_pc = pd.read_excel(power_curve_file, sheet_name=pc_sheet_name)
+                
+                # Create a lookup dictionary: {WindSpeed: Power}
+                pc_lookup = dict(zip(df_pc.iloc[:, 0].round(1), df_pc.iloc[:, 1]))
+
+                # D. Retrieve the Power from the curve
+                df_turb['Retrieved_Power'] = df_turb['Lookup_WS'].map(pc_lookup)
+
+                # --- NEW: E. Calculate Energy (kWh) ---
+                # Assuming 10-minute intervals: Power * (10/60 hours)
+                df_turb['Retrieved_Energy_kWh'] = df_turb['Retrieved_Power'] * (10/60)
+
+                # F. Select the specific columns for the final report
+                output_cols = [
+                    'Timestamp', 
+                    'Power', 
+                    'Lookup_WS', 
+                    'Retrieved_Power', 
+                    'Retrieved_Energy_kWh'
+                ]
+                
+                # Rename for clarity
+                final_export = df_turb[output_cols].rename(columns={'Lookup_WS': 'Adjusted_WS_Rounded'})
+                
+                final_export.to_excel(writer, sheet_name=t_id, index=False)
+                
+                print(f"  -> Successfully added {t_id} to master report.")
+
+            except Exception as e:
+                print(f"  -> Error processing {t_id}: {e}")
+
+    print("\n" + "="*40)
+    print(f"DONE: File saved as '{output_filename}'")
+    print("="*40)
+
+if __name__ == "__main__":
+    main()
