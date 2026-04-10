@@ -67,7 +67,7 @@ def export_all_methods(results_dict, original_filename):
     print("-" * 45)
     return output_name
 
-    # processingb.py
+# processingb.py
 import pandas as pd
 import numpy as np
 
@@ -80,14 +80,35 @@ def _get_active_only_values(dataframe, col_idx):
     return target_vals.where(power_vals > 0, np.nan)
 
 def _get_raw_ws_averages(all_data, turbine_list):
-    """Averages Wind Speed (Col B) regardless of ON/OFF status."""
+    """
+    Averages Wind Speed (Col B) ONLY for turbines that are currently ON (Col C > 0).
+    If a turbine is OFF or Power is NaN, its Wind Speed is excluded from the mean.
+    """
     if not turbine_list:
         return pd.Series(np.nan)
-    ws_data = [all_data[t].iloc[:, 1].replace(0, np.nan) for t in turbine_list if t in all_data]
-    if not ws_data:
+        
+    ws_data_points = []
+    
+    for t in turbine_list:
+        if t in all_data:
+            df = all_data[t]
+            ws = df.iloc[:, 1]      # Column B (Wind Speed)
+            pwr = df.iloc[:, 2]     # Column C (Actual Power)
+            
+            # Logic: Keep WS only where Power > 0, otherwise set to NaN
+            # This ensures they are excluded from the .mean() calculation
+            filtered_ws = ws.where(pwr > 0, np.nan)
+            
+            # Further safety: handle zero wind speeds that might be errors
+            filtered_ws = filtered_ws.replace(0, np.nan)
+            
+            ws_data_points.append(filtered_ws)
+            
+    if not ws_data_points:
         return pd.Series(np.nan)
-    return pd.concat(ws_data, axis=1).mean(axis=1)
-
+        
+    # axis=1 averages across the rows (time intervals) for all turbines in the list
+    return pd.concat(ws_data_points, axis=1).mean(axis=1)
 def _get_theoretical_power(target_df, pc_df):
     """Calculates kW from local wind speed using the provided Power Curve."""
     temp = target_df.copy()
@@ -177,7 +198,7 @@ def method_6(df_t, all_d, df_pc):
     ref = s_pwr.combine_first(theoretical)
     return _finalize_results(df_t, ref)
 
-    # uib.py
+# uib.py
 from configb import TURBINE_FILES
 
 def select_turbine_dataset():
@@ -192,8 +213,7 @@ def display_final_status(file_path):
     print(f"ANALYSIS COMPLETE")
     print(f"All 6 methods exported to: {file_path}")
     print("="*50 + "\n")
-
-#configb.py
+# config.py
 POWER_CURVE_FILE = 'Copy of Deeping St Nicholas Power Curves.xlsx'
 
 TURBINE_FILES = [
@@ -213,7 +233,6 @@ NEIGHBOR_MAP = {
     'D T07 23-26.xlsx': ['D T06 23-26.xlsx', 'D T08 23-26.xlsx'],
     'D T08 23-26.xlsx': ['D T07 23-26.xlsx', 'D T06 23-26.xlsx'],
 }
-
 # Mainb.py
 from configb import POWER_CURVE_FILE, TURBINE_FILES, NEIGHBOR_MAP
 from turbine_analyticsb import uib, data_iob, processingb
