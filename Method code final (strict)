@@ -1,0 +1,275 @@
+# turbine_analyticsb/data_iob.py
+import pandas as pd
+from configb import INTERVAL_HRS
+
+def load_turbine_data(file_path):
+    return pd.read_excel(file_path, usecols="A,B,C", header=0)
+
+def load_power_curve_sheet(power_curve_file, sheet_name):
+    excel_obj = pd.ExcelFile(power_curve_file)
+    df_curve = pd.read_excel(excel_obj, sheet_name=sheet_name, header=0)
+    df_curve.columns = ['WS_Ref', 'Power_Ref']
+    return df_curve
+
+def export_all_methods(results_dict, original_filename):
+    output_name = f"Strict_Analysis_{original_filename}"
+    
+    with pd.ExcelWriter(output_name, engine='xlsxwriter') as writer:
+        print(f"\n--- Critical Row Removal Report for {original_filename} ---")
+        
+        for m_name, (df, ts_col, is_on, is_stop) in results_dict.items():
+            # 1. Identify rows to be removed (NaN Reference while Turbine is OFF)
+            critical_missing_mask = df['Power_Ref'].isna() & is_stop
+            removed_df = df[critical_missing_mask].copy()
+            removed_count = len(removed_df)
+
+            # 2. Clean main data for export
+            clean_df = df.dropna(subset=['Power_Ref']).copy()
+            print(f"Method {m_name:.<25}: {removed_count} critical rows removed.")
+
+            actual_pwr_col = clean_df.columns[2]
+            is_on_clean = clean_df[actual_pwr_col] > 0
+            is_stop_clean = (~is_on_clean).fillna(True)
+            
+            # Formatting Timestamps for all dataframes
+            for d in [clean_df, removed_df]:
+                if not d.empty:
+                    d[ts_col] = pd.to_datetime(d[ts_col]).dt.strftime('%d-%m-%Y %H:%M')
+            
+            cols = [ts_col, actual_pwr_col, 'Power_Ref']
+            
+            # 3. Create subsets for output
+            full_df = clean_df[cols]
+            on_df = clean_df.loc[is_on_clean, cols].copy()
+            on_df['Produced_Energy_kWh'] = on_df['Power_Ref'] * INTERVAL_HRS
+            
+            off_df = clean_df.loc[is_stop_clean, cols].copy()
+            off_df['Lost_Energy_kWh'] = off_df['Power_Ref'] * INTERVAL_HRS
+
+            # --- EXPORT TO EXCEL ---
+            # Main tables
+            full_df.to_excel(writer, sheet_name=m_name, index=False, startcol=0)
+            on_df.to_excel(writer, sheet_name=m_name, index=False, startcol=4)
+            off_df.to_excel(writer, sheet_name=m_name, index=False, startcol=9)
+            
+            # NEW: Removed Rows table (Starting at Column O / Index 14)
+            if not removed_df.empty:
+                removed_df[cols].to_excel(writer, sheet_name=m_name, index=False, startcol=14)
+
+            # --- FORMATTING ---
+            ws = writer.sheets[m_name]
+            wb = writer.book
+            h_fmt = wb.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1, 'align': 'center'})
+            warn_fmt = wb.add_format({'bold': True, 'bg_color': '#FFC7CE', 'font_color': '#9C0006', 'border': 1, 'align': 'center'})
+            num_fmt = wb.add_format({'num_format': '#,##0.00'})
+
+            ws.write(0, 0, "FULL DATASET", h_fmt)
+            ws.write(0, 4, "TURBINE ON (Ref)", h_fmt)
+            ws.write(0, 9, "TURBINE OFF (Loss)", h_fmt)
+            ws.write(0, 14, "CRITICAL REMOVALS (Target OFF / Ref Missing)", warn_fmt)
+            
+            # Set Column widths
+            ws.set_column('A:C', 18, num_fmt)
+            ws.set_column('E:G', 18, num_fmt)
+            ws.set_column('J:L', 18, num_fmt)
+            ws.set_column('O:Q', 18, num_fmt)
+            
+    print("-" * 65)
+    return output_name
+
+# turbine_analyticsb/processingb.py
+import pandas as pd
+import numpy as np
+
+# --- INTERNAL HELPERS ---
+
+def _get_active_only_values(dataframe, col_idx):
+    """
+    Filters target values (Wind Speed or Power) based on Turbine Status.
+    Only returns the value if Actual Power (Column Index 2) is greater than 0.
+    Otherwise, returns NaN so it is ignored in averaging.
+    """
+    actual_pwr = dataframe.iloc[:, 2] # Column C
+    target_vals = dataframe.iloc[:, col_idx]
+    
+    # Logic: Keep the value only if turbine is producing power
+    return target_vals.where(actual_pwr > 0, np.nan)
+
+def _get_raw_ws_averages(all_d, peer_list):
+    """
+    Averages Wind Speed (Col B) for all turbines in the peer_list that are ON.
+    The .mean(axis=1) function automatically handles NaNs:
+    - If 1 turbine is ON: Returns that turbine's WS.
+    - If 5 turbines are ON: Returns the average of those 5.
+    - If 0 turbines are ON: Returns NaN (triggering row removal).
+    """
+    if not peer_list:
+        return pd.Series(np.nan)
+    
+    ws_points = []
+    for t_file in peer_list:
+        if t_file in all_d:
+            df = all_d[t_file]
+            # Get Wind Speed (Col B) only where Power (Col C) > 0
+            # Also replace 0.0 Wind Speed with NaN to avoid stalled sensor bias
+            filtered_ws = df.iloc[:, 1].where(df.iloc[:, 2] > 0, np.nan).replace(0, np.nan)
+            ws_points.append(filtered_ws)
+            
+    if not ws_points:
+        return pd.Series(np.nan)
+    
+    # Calculate row-wise mean of all active peers
+    return pd.concat(ws_points, axis=1).mean(axis=1)
+
+def _get_theoretical_power(target_df, pc_df):
+    """
+    Calculates Power (kW) from the local anemometer.
+    Used for Methods 1 and 2.
+    """
+    temp = target_df.copy()
+    # Replace 0 wind with NaN
+    ws_local = temp.iloc[:, 1].replace(0, np.nan)
+    temp['WS_R'] = ws_local.round(1)
+    
+    # Lookup kW from the Power Curve
+    merged = pd.merge(temp, pc_df, left_on='WS_R', right_on='WS_Ref', how='left')
+    return merged['Power_Ref']
+
+def _finalize_results(target_df, ref_stream):
+    """
+    Prepares the final DataFrame for export.
+    Keeps Actual Power and the calculated Reference Power side-by-side.
+    """
+    df_result = target_df.copy()
+    ts_col = df_result.columns[0]
+    
+    # Store the calculated Reference Power
+    df_result['Power_Ref'] = ref_stream
+    
+    # Status flags for splitting the data into ON/OFF buckets during export
+    is_on = df_result.iloc[:, 2] > 0
+    is_stop = (~is_on).fillna(True)
+    
+    return df_result, ts_col, is_on, is_stop
+
+# --- THE 6 STRICT METHODS ---
+
+def method_1(df_t, pc_def):
+    """Method 1: Local Wind Speed + Default Power Curve."""
+    ref = _get_theoretical_power(df_t, pc_def)
+    return _finalize_results(df_t, ref)
+
+def method_2(df_t, pc_lrn):
+    """Method 2: Local Wind Speed + Learned Power Curve."""
+    ref = _get_theoretical_power(df_t, pc_lrn)
+    return _finalize_results(df_t, ref)
+
+def method_3(df_t, pc_lrn, all_d, neighbors):
+    """Method 3: Average Wind Speed of ON Neighbors -> Learned PC."""
+    ws_avg = _get_raw_ws_averages(all_d, neighbors)
+    ws_df = pd.DataFrame({'WS_R': ws_avg.round(1)})
+    ref = pd.merge(ws_df, pc_lrn, left_on='WS_R', right_on='WS_Ref', how='left')['Power_Ref']
+    return _finalize_results(df_t, ref)
+
+def method_4(df_t, pc_lrn, all_d, peers):
+    """Method 4: Average Wind Speed of ON Farm Peers -> Learned PC."""
+    ws_avg = _get_raw_ws_averages(all_d, peers)
+    ws_df = pd.DataFrame({'WS_R': ws_avg.round(1)})
+    ref = pd.merge(ws_df, pc_lrn, left_on='WS_R', right_on='WS_Ref', how='left')['Power_Ref']
+    return _finalize_results(df_t, ref)
+
+def method_5(df_t, all_d, neighbors):
+    """Method 5: Average Actual Power (kW) of ON Neighbors."""
+    if not neighbors:
+        return _finalize_results(df_t, pd.Series(np.nan, index=df_t.index))
+    
+    # Average power values only from neighbors where Power > 0
+    ref = pd.concat([_get_active_only_values(all_d[n], 2) for n in neighbors if n in all_d], axis=1).mean(axis=1)
+    return _finalize_results(df_t, ref)
+
+def method_6(df_t, all_d, peers):
+    """Method 6: Average Actual Power (kW) of ON Farm Peers."""
+    # Average power values only from farm turbines where Power > 0
+    ref = pd.concat([_get_active_only_values(all_d[p], 2) for p in peers if p in all_d], axis=1).mean(axis=1)
+    return _finalize_results(df_t, ref)
+
+# uib.py
+from configb import TURBINE_FILES
+
+def select_turbine_dataset():
+    print("\n--- Step 1: Select Turbine for Strict Analysis ---")
+    for idx, f in enumerate(TURBINE_FILES, 1):
+        print(f"[{idx}] {f}")
+    choice = int(input("Selection (1-8): ")) - 1
+    return TURBINE_FILES[choice]
+
+def display_final_status(file_path):
+    print("\n" + "="*50)
+    print(f"STRICT ANALYSIS COMPLETE")
+    print(f"Results exported to: {file_path}")
+    print("="*50 + "\n")
+
+# configb.py
+
+POWER_CURVE_FILE = 'Copy of Deeping St Nicholas Power Curves.xlsx'
+
+TURBINE_FILES = [
+    'D T01 23-26.xlsx', 'D T02 23-26.xlsx', 'D T03 23-26.xlsx', 'D T04 23-26.xlsx', 
+    'D T05 23-26.xlsx', 'D T06 23-26.xlsx', 'D T07 23-26.xlsx', 'D T08 23-26.xlsx'
+]
+
+INTERVAL_HRS = 10 / 60
+
+NEIGHBOR_MAP = {
+    'D T01 23-26.xlsx': ['D T02 23-26.xlsx', 'D T03 23-26.xlsx'],
+    'D T02 23-26.xlsx': ['D T01 23-26.xlsx', 'D T03 23-26.xlsx'],
+    'D T03 23-26.xlsx': ['D T02 23-26.xlsx', 'D T04 23-26.xlsx'],
+    'D T04 23-26.xlsx': ['D T03 23-26.xlsx', 'D T05 23-26.xlsx'],
+    'D T05 23-26.xlsx': ['D T04 23-26.xlsx', 'D T03 23-26.xlsx'],
+    'D T06 23-26.xlsx': ['D T07 23-26.xlsx', 'D T08 23-26.xlsx'],
+    'D T07 23-26.xlsx': ['D T06 23-26.xlsx', 'D T08 23-26.xlsx'],
+    'D T08 23-26.xlsx': ['D T07 23-26.xlsx', 'D T06 23-26.xlsx'],
+}
+
+# Mainb.py
+from configb import POWER_CURVE_FILE, TURBINE_FILES, NEIGHBOR_MAP
+from turbine_analyticsb import uib, data_iob, processingb
+
+def run_application():
+    try:
+        target_file = uib.select_turbine_dataset()
+        
+        # Metadata for Power Curve Sheet
+        t_id = target_file.split(' ')[1].replace('T','').lstrip('0')
+        learned_sheet = f"Deeping T{t_id}"
+        
+        # Load Data
+        all_data = {f: data_iob.load_turbine_data(f) for f in TURBINE_FILES}
+        target_df = all_data[target_file]
+        neighbors = NEIGHBOR_MAP.get(target_file)
+        
+        # EXCLUDE SELF: Create a list of farm turbines that are NOT the target
+        other_turbines = [f for f in TURBINE_FILES if f != target_file]
+
+        pc_def = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, "Default PC")
+        pc_lrn = data_iob.load_power_curve_sheet(POWER_CURVE_FILE, learned_sheet)
+
+        print(f"\nProcessing {target_file} (Strict Peer-Only Logic)...")
+        results = {}
+        
+        results["1_Local_Default_PC"] = processingb.method_1(target_df, pc_def)
+        results["2_Local_Learned_PC"] = processingb.method_2(target_df, pc_lrn)
+        results["3_Neighbor_WS"]     = processingb.method_3(target_df, pc_lrn, all_data, neighbors)
+        results["4_Farm_WS_Peer"]    = processingb.method_4(target_df, pc_lrn, all_data, other_turbines)
+        results["5_Neighbor_kW"]     = processingb.method_5(target_df, all_data, neighbors)
+        results["6_Farm_kW_Peer"]    = processingb.method_6(target_df, all_data, other_turbines)
+
+        # Export
+        final_path = data_iob.export_all_methods(results, target_file)
+        uib.display_final_status(final_path)
+
+    except Exception as e:
+        print(f"\nCRITICAL ERROR: {e}")
+
+if __name__ == "__main__":
+    run_application()
