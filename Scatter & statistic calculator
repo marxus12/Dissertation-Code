@@ -1,0 +1,136 @@
+import pandas as pd
+import numpy as np
+import os
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+
+# --- 1. CONFIGURATION ---
+your_analysis_file = 'Final_Combined_Power_Analysis.xlsx'
+output_file = 'Turbine_Ref_Method_Validation_Report.xlsx'
+
+reference_sheets = [
+    '1_Default_PC', '2_Learned_PC', '3_Primary_WS_Ref', 
+    '4_Farm_WS_Ref', '5_Primary_kW_Ref', '6_Farm_kW_Ref'
+]
+
+def calculate_metrics(y_true, y_pred):
+    """Calculates statistical KPIs for a given set of true and predicted values."""
+    # Ensure we are comparing equal-length non-null vectors
+    mask = ~y_true.isna() & ~y_pred.isna()
+    y_t = y_true[mask]
+    y_p = y_pred[mask]
+    
+    if len(y_t) < 15:
+        return {k: np.nan for k in ['R2', 'MAE', 'RMSE', 'MBE', 'StdDev', 'Count']}
+    
+    r2 = r2_score(y_t, y_p) if y_t.nunique() > 1 else 0
+    mae = mean_absolute_error(y_t, y_p)
+    rmse = np.sqrt(mean_squared_error(y_t, y_p))
+    mbe = np.mean(y_p - y_t) 
+    std_err = np.std(y_p - y_t)
+    
+    return {
+        'R2': round(r2, 4), 'MAE': round(mae, 2),
+        'RMSE': round(rmse, 2), 'MBE': round(mbe, 2), 
+        'StdDev': round(std_err, 2), 'Count': len(y_t)
+    }
+
+def main():
+    if not os.path.exists(your_analysis_file):
+        print(f"Error: {your_analysis_file} not found.")
+        return
+
+    summary_data = []
+
+    try:
+        with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            
+            for t_idx in range(1, 9):
+                t_id_short = f'T{t_idx}'
+                t_id_long = f'T{t_idx:02}'
+                master_file = f'Full_Analysis_D {t_id_long} 23-26.xlsx'
+                
+                if not os.path.exists(master_file):
+                    continue
+
+                try:
+                    print(f"Processing {t_id_short} (Including Data Gaps)...")
+                    
+                    # 1. LOAD YOUR FILE
+                    df_your = pd.read_excel(your_analysis_file, sheet_name=t_id_short, usecols=[0, 3])
+                    df_your.columns = ['Timestamp', 'Potential_Your']
+                    df_your['Timestamp'] = pd.to_datetime(df_your['Timestamp'], dayfirst=True, errors='coerce')
+
+                    turbine_results = {'Turbine': t_id_short}
+                    plot_sheet = workbook.add_worksheet(f'{t_id_short}_Charts')
+                    data_sheet = workbook.add_worksheet(f'{t_id_short}_PlotData')
+
+                    for i, ref_sheet in enumerate(reference_sheets):
+                        # 2. LOAD MASTER FILE
+                        df_master = pd.read_excel(master_file, sheet_name=ref_sheet, usecols=[0, 1, 2])
+                        df_master.columns = ['TS_Master', 'Actual_Pwr_Master', 'Potential_Master']
+                        df_master['TS_Master'] = pd.to_datetime(df_master['TS_Master'], dayfirst=True, errors='coerce')
+                        
+                        # --- ON ANALYSIS (Strictly Actual > 0) ---
+                        on_data_master = df_master[df_master['Actual_Pwr_Master'] > 0].copy()
+                        on_stats = calculate_metrics(on_data_master['Actual_Pwr_Master'], 
+                                                     on_data_master['Potential_Master'])
+                        for k, v in on_stats.items():
+                            turbine_results[f'{ref_sheet}_ON_{k}'] = v
+
+                        # --- OFF & MISSING ANALYSIS (Actual <= 0 OR Actual is NaN) ---
+                        # Merge to align your potential calculation
+                        merged = pd.merge(df_master, df_your, left_on='TS_Master', right_on='Timestamp', how='left')
+                        
+                        # LOGIC: Validation Point if (Power <= 0) OR (Power is Null/Missing)
+                        off_mask = (merged['Actual_Pwr_Master'] <= 0) | (merged['Actual_Pwr_Master'].isna())
+                        off_data = merged[off_mask].copy()
+                        
+                        off_stats = calculate_metrics(off_data['Potential_Master'], 
+                                                      off_data['Potential_Your'])
+                        for k, v in off_stats.items():
+                            turbine_results[f'{ref_sheet}_OFF_{k}'] = v
+
+                        # --- PLOTTING ---
+                        start_col = i * 5
+                        data_sheet.write_row(0, start_col, [f'{ref_sheet}_ON_X', f'{ref_sheet}_ON_Y', f'{ref_sheet}_OFF_X', f'{ref_sheet}_OFF_Y'])
+                        
+                        # Ensure we don't try to write NaNs to Excel Chart categories
+                        chart_on_df = on_data_master[['Potential_Master', 'Actual_Pwr_Master']].dropna()
+                        chart_off_df = off_data[['Potential_Your', 'Potential_Master']].dropna()
+
+                        data_sheet.write_column(1, start_col, chart_on_df['Potential_Master'])
+                        data_sheet.write_column(1, start_col+1, chart_on_df['Actual_Pwr_Master'])
+                        data_sheet.write_column(1, start_col+2, chart_off_df['Potential_Your'])
+                        data_sheet.write_column(1, start_col+3, chart_off_df['Potential_Master'])
+
+                        # Chart Generation
+                        chart_on = workbook.add_chart({'type': 'scatter'})
+                        chart_on.add_series({
+                            'name': f'{ref_sheet} ON Performance',
+                            'categories': [f'{t_id_short}_PlotData', 1, start_col, len(chart_on_df), start_col],
+                            'values':     [f'{t_id_short}_PlotData', 1, start_col+1, len(chart_on_df), start_col+1],
+                            'marker':     {'type': 'circle', 'size': 2, 'fill': {'color': '#00B050'}},
+                        })
+                        chart_off = workbook.add_chart({'type': 'scatter'})
+                        chart_off.add_series({
+                            'name': f'{ref_sheet} OFF/Gap Validation',
+                            'categories': [f'{t_id_short}_PlotData', 1, start_col+2, len(chart_off_df), start_col+2],
+                            'values':     [f'{t_id_short}_PlotData', 1, start_col+3, len(chart_off_df), start_col+3],
+                            'marker':     {'type': 'circle', 'size': 2, 'fill': {'color': '#C00000'}},
+                        })
+                        plot_sheet.insert_chart(i * 15, 0, chart_on)
+                        plot_sheet.insert_chart(i * 15, 8, chart_off)
+
+                    summary_data.append(turbine_results)
+                except Exception as e:
+                    print(f"  -> Error on {t_id_short}: {e}")
+
+            if summary_data:
+                pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary_Report', index=False)
+
+    except PermissionError:
+        print(f"\nCRITICAL ERROR: Close '{output_file}' and run again.")
+
+if __name__ == "__main__":
+    main()
