@@ -1,0 +1,84 @@
+import pandas as pd
+import numpy as np
+import os
+
+# --- CONFIGURATION ---
+input_file = 'Turbine_Yearly_PBA_Isolated_Report.xlsx'
+output_file = 'PBA_Total_Error_Analysis.xlsx'
+
+def main():
+    if not os.path.exists(input_file):
+        print(f"Error: {input_file} not found. Ensure the PBA report exists.")
+        return
+
+    # Load the results
+    df = pd.read_excel(input_file)
+    
+    # Start with identifiers
+    analysis_results = df[['Turbine', 'Year']].copy()
+
+    # --- THE PAIRED LOOP (Columns C through N) ---
+    for i in range(2, 14, 2):
+        try:
+            true_col_name = df.columns[i]      
+            method_col_name = df.columns[i+1]  
+            
+            base_label = method_col_name.replace('_PBA_%', '')
+            
+            # 1. Raw Error (Directional)
+            raw_err_col = f"Error_{base_label}"
+            analysis_results[raw_err_col] = df[method_col_name] - df[true_col_name]
+            
+            # 2. Absolute Error (Magnitude)
+            abs_err_col = f"Abs_Error_{base_label}"
+            analysis_results[abs_err_col] = analysis_results[raw_err_col].abs()
+            
+        except IndexError:
+            break
+
+    # --- SUMMARY STATISTICS (Now including Sums) ---
+    summary_data = []
+    # We use the raw error columns as our loop anchor
+    raw_err_cols = [c for c in analysis_results.columns if c.startswith('Error_')]
+    
+    for r_col in raw_err_cols:
+        method_name = r_col.replace('Error_', '')
+        abs_col = f"Abs_Error_{method_name}"
+        
+        # Calculations
+        sum_raw = analysis_results[r_col].sum()
+        sum_abs = analysis_results[abs_col].sum()
+        mean_abs = analysis_results[abs_col].mean()
+        
+        summary_data.append({
+            'Method': method_name, 
+            'Sum_of_Raw_Error': round(sum_raw, 4),
+            'Sum_of_Abs_Error': round(sum_abs, 4),
+            'Mean_Abs_Error (MAE)': round(mean_abs, 5)
+        })
+    
+    # Create the ranking dataframe
+    df_summary = pd.DataFrame(summary_data).sort_values(by='Mean_Abs_Error (MAE)')
+
+    # --- EXPORT ---
+    with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+        analysis_results.to_excel(writer, sheet_name='Detailed_Variance', index=False)
+        df_summary.to_excel(writer, sheet_name='Performance_Summary', index=False)
+        
+        workbook = writer.book
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
+        
+        # Format the Summary Sheet
+        ws_sum = writer.sheets['Performance_Summary']
+        for col_num, value in enumerate(df_summary.columns.values):
+            ws_sum.write(0, col_num, value, header_fmt)
+            ws_sum.set_column(col_num, col_num, 22)
+
+        # Format the Detailed Sheet
+        ws_det = writer.sheets['Detailed_Variance']
+        ws_det.set_column('A:Z', 18)
+
+    print(f"Analysis Complete. Results saved to '{output_file}'.")
+
+if __name__ == "__main__":
+    main()
