@@ -1,0 +1,120 @@
+import pandas as pd
+import numpy as np
+import os
+
+# --- 1. CONFIGURATION ---
+input_file = 'method_Stats_calculator(heiarachy).xlsx'
+output_file = 'stats_compiled(heiarachyR).xlsx'
+
+# The 6 methods analyzed
+methods = [
+    '1_Default_PC', '2_Learned_PC', '3_Primary_WS_Ref', 
+    '4_Farm_WS_Ref', '5_Primary_kW_Ref', '6_Farm_kW_Ref'
+]
+
+# Mapping the metrics as they appear in your 6-column blocks (R2, MAE, RMSE, MBE, StdDev)
+metrics_to_process = ['R2', 'MAE', 'RMSE', 'MBE', 'StdDev']
+
+# Chart configurations for professional Y-axis scaling in your dissertation
+plot_configs = {
+    'R2':     {'mean_col': 'C', 'std_col': 'D', 'min': 0.7, 'max': 1.0},
+    'MAE':    {'mean_col': 'E', 'std_col': 'F', 'min': 0,   'max': 100},
+    'RMSE':   {'mean_col': 'G', 'std_col': 'H', 'min': 0,   'max': 150},
+    'MBE':    {'mean_col': 'I', 'std_col': 'J', 'min': -50, 'max': 50},
+    'StdDev': {'mean_col': 'K', 'std_col': 'L', 'min': 0,   'max': 150}
+}
+
+def main():
+    if not os.path.exists(input_file):
+        print(f"Error: {input_file} not found. Ensure your validation report exists.")
+        return
+
+    # Load the Summary_Report containing the 8 turbines per method
+    df = pd.read_excel(input_file, sheet_name='Summary_Report')
+    fleet_summary = []
+    
+    with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        
+        # --- 1. COMPILATION LOGIC ---
+        for i, method_name in enumerate(methods):
+            # ON block starts at index 1 (Col B), OFF block starts at index 7 (Col H)
+            # Each method block spans 12 columns (6 ON, 6 OFF)
+            on_base_idx = 1 + (i * 12)
+            off_base_idx = 7 + (i * 12)
+            
+            for state, base_idx in [('ON', on_base_idx), ('OFF', off_base_idx)]:
+                stats_row = {'Method': method_name, 'State': state}
+                
+                for m_idx, metric in enumerate(metrics_to_process):
+                    col_idx = base_idx + m_idx
+                    data = df.iloc[:, col_idx].dropna()
+                    
+                    if not data.empty:
+                        # We calculate the Mean (Accuracy) and StdDev (Consistency) for every metric
+                        stats_row[f'{metric}_Mean'] = data.mean()
+                        stats_row[f'{metric}_StdDev'] = data.std()
+                
+                fleet_summary.append(stats_row)
+
+        df_stats = pd.DataFrame(fleet_summary)
+        df_stats.to_excel(writer, sheet_name='Stats_Summary', index=False)
+        
+        # --- 2. PLOTTING LOGIC (One sheet per Metric) ---
+        for metric, cfg in plot_configs.items():
+            sheet_name = f'{metric}_Analysis'
+            ws = workbook.add_worksheet(sheet_name)
+            
+            m_col = cfg['mean_col']
+            s_col = cfg['std_col']
+
+            # CHART 1: ON STATE (Interleaved Even Rows: 2, 4, 6, 8, 10, 12)
+            chart_on = workbook.add_chart({'type': 'line'})
+            chart_on.add_series({
+                'name':       f'Mean {metric} (ON)',
+                'categories': '=(Stats_Summary!$A$2,Stats_Summary!$A$4,Stats_Summary!$A$6,Stats_Summary!$A$8,Stats_Summary!$A$10,Stats_Summary!$A$12)',
+                'values':     f'=(Stats_Summary!${m_col}$2,Stats_Summary!${m_col}$4,Stats_Summary!${m_col}$6,Stats_Summary!${m_col}$8,Stats_Summary!${m_col}$10,Stats_Summary!${m_col}$12)',
+                'line':       {'color': '#2E75B6', 'width': 2},
+                'marker':     {'type': 'circle', 'size': 6, 'fill': {'color': '#2E75B6'}},
+                'y_error_bars': {
+                    'type': 'custom',
+                    'plus_values':  f'=(Stats_Summary!${s_col}$2,Stats_Summary!${s_col}$4,Stats_Summary!${s_col}$6,Stats_Summary!${s_col}$8,Stats_Summary!${s_col}$10,Stats_Summary!${s_col}$12)',
+                    'minus_values': f'=(Stats_Summary!${s_col}$2,Stats_Summary!${s_col}$4,Stats_Summary!${s_col}$6,Stats_Summary!${s_col}$8,Stats_Summary!${s_col}$10,Stats_Summary!${s_col}$12)',
+                    'line': {'color': '#2E75B6'}
+                },
+            })
+            chart_on.set_title({'name': f'Fleet Consistency: {metric} (ON State)'})
+            chart_on.set_y_axis({'name': f'{metric} Value', 'min': cfg['min'], 'max': cfg['max']})
+
+            # CHART 2: OFF STATE (Interleaved Odd Rows: 3, 5, 7, 9, 11, 13)
+            chart_off = workbook.add_chart({'type': 'line'})
+            chart_off.add_series({
+                'name':       f'Mean {metric} (OFF)',
+                'categories': '=(Stats_Summary!$A$3,Stats_Summary!$A$5,Stats_Summary!$A$7,Stats_Summary!$A$9,Stats_Summary!$A$11,Stats_Summary!$A$13)',
+                'values':     f'=(Stats_Summary!${m_col}$3,Stats_Summary!${m_col}$5,Stats_Summary!${m_col}$7,Stats_Summary!${m_col}$9,Stats_Summary!${m_col}$11,Stats_Summary!${m_col}$13)',
+                'line':       {'color': '#C00000', 'width': 2},
+                'marker':     {'type': 'square', 'size': 6, 'fill': {'color': '#C00000'}},
+                'y_error_bars': {
+                    'type': 'custom',
+                    'plus_values':  f'=(Stats_Summary!${s_col}$3,Stats_Summary!${s_col}$5,Stats_Summary!${s_col}$7,Stats_Summary!${s_col}$9,Stats_Summary!${s_col}$11,Stats_Summary!${s_col}$13)',
+                    'minus_values': f'=(Stats_Summary!${s_col}$3,Stats_Summary!${s_col}$5,Stats_Summary!${s_col}$7,Stats_Summary!${s_col}$9,Stats_Summary!${s_col}$11,Stats_Summary!${s_col}$13)',
+                    'line': {'color': '#C00000'}
+                },
+            })
+            chart_off.set_title({'name': f'Fleet Consistency: {metric} (OFF State)'})
+            chart_off.set_y_axis({'name': f'{metric} Value', 'min': cfg['min'], 'max': cfg['max']})
+
+            ws.insert_chart('B2', chart_on)
+            ws.insert_chart('K2', chart_off)
+
+        # Formatting for a professional dissertation-ready look
+        ws_stats = writer.sheets['Stats_Summary']
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
+        for col_num, value in enumerate(df_stats.columns.values):
+            ws_stats.write(0, col_num, value, header_fmt)
+            ws_stats.set_column(col_num, col_num, 16)
+
+    print(f"Success! Final analysis with {len(plot_configs)} metric plots saved to '{output_file}'")
+
+if __name__ == "__main__":
+    main()
