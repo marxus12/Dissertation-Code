@@ -1,0 +1,109 @@
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# --- 1. CONFIGURATION ---
+input_file = 'method_Stats_calculator(strict).xlsx'
+output_file = 'stats_compiled(strict).xlsx'
+
+# Mapping: { "Original Name in Data": "Desired Name for Plot" }
+method_mapping = {
+    '1_Local_Default_PC': '1_Default_PC',
+    '2_Local_Learned_PC': '2_Learned_PC',
+    '3_Neighbor_WS':      '3_Primary_WS_Ref',
+    '4_Farm_WS_Peer':     '4_Farm_WS_Ref',
+    '5_Neighbor_kW':      '5_Primary_kW_Ref',
+    '6_Farm_kW_Peer':     '6_Farm_kW_Ref'
+}
+
+# Get list of original names to iterate through columns correctly
+original_methods = list(method_mapping.keys())
+
+metrics_to_process = ['R2', 'MAE', 'RMSE', 'MBE', 'StdDev']
+
+plot_configs = {
+    'R2':     {'min': 0.85, 'max': 1.0, 'label': 'Average Coefficient of Determination ($R^2$)'},
+    'MAE':    {'min': 0,    'max': 80,  'label': 'Average Mean Absolute Error (kW)'},
+    'RMSE':   {'min': 0,    'max': 150, 'label': 'Average Root Mean Square Error (kW)'},
+    'MBE':    {'min': -250, 'max': 250, 'label': 'Total Mean Bias Error (kW)'},
+    'StdDev': {'min': 0,    'max': 150, 'label': 'Average Standard Deviation (kW)'}
+}
+
+def main():
+    if not os.path.exists(input_file):
+        print(f"Error: {input_file} not found.")
+        return
+
+    df = pd.read_excel(input_file, sheet_name='Summary_Report')
+    fleet_summary = []
+    
+    # --- 2. DATA COMPILATION ---
+    for i, orig_name in enumerate(original_methods):
+        # Determine the new display name
+        display_name = method_mapping[orig_name]
+        
+        # Calculation indices remain based on the 12-column jump logic
+        on_base_idx = 1 + (i * 12)
+        off_base_idx = 7 + (i * 12)
+        
+        for state, base_idx in [('ON', on_base_idx), ('OFF', off_base_idx)]:
+            # We store the data using the NEW display_name
+            stats_row = {'Method': display_name, 'State': state}
+            
+            for m_idx, metric in enumerate(metrics_to_process):
+                col_idx = base_idx + m_idx
+                data = df.iloc[:, col_idx].dropna()
+                
+                if not data.empty:
+                    if metric == 'MBE':
+                        stats_row[f'{metric}_Value'] = data.sum() 
+                    else:
+                        stats_row[f'{metric}_Value'] = data.mean()
+                        stats_row[f'{metric}_StdDev'] = data.std()
+            fleet_summary.append(stats_row)
+
+    df_stats = pd.DataFrame(fleet_summary)
+    
+    # Save to Excel
+    with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+        df_stats.to_excel(writer, sheet_name='Stats_Summary', index=False)
+
+    # --- 3. PLOTTING ---
+    sns.set_theme(style="whitegrid")
+    
+    for metric in metrics_to_process:
+        cfg = plot_configs[metric]
+        plt.figure(figsize=(10, 6))
+        
+        off_data = df_stats[df_stats['State'] == 'OFF']
+
+        ax = sns.barplot(
+            x='Method', 
+            y=f'{metric}_Value', 
+            data=off_data, 
+            color='#C00000', 
+            edgecolor='black'
+        )
+
+        # Title Logic
+        display_title = "Total MBE" if metric == 'MBE' else ("$R^2$" if metric == 'R2' else ( "Fleet Consistency (StdDev)" if metric == 'StdDev' else metric))
+        plt.title(f'Fleet Performance: {display_title} (OFF State)', fontweight='bold', fontsize=14)
+        
+        plt.ylim(cfg['min'], cfg['max'])
+        plt.ylabel(cfg['label'], fontsize=12)
+        plt.xlabel('Method', fontsize=12)
+        
+        plt.xticks(rotation=35, ha='right')
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+
+        plt.tight_layout()
+        
+        save_name = f"Dissertation_BarPlot_{metric}_OFF.png"
+        plt.savefig(save_name, dpi=300, bbox_inches='tight')
+        print(f"Generated: {save_name} with display names.")
+        plt.close()
+
+if __name__ == "__main__":
+    main()
