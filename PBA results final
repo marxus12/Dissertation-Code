@@ -1,0 +1,120 @@
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# --- CONFIGURATION ---
+input_file = 'Turbine_Yearly_PBA_Isolated_Report.xlsx'
+output_file = 'PBA_Total_Error_AnalysisR.xlsx'
+
+def main():
+    if not os.path.exists(input_file):
+        print(f"Error: {input_file} not found. Ensure the PBA report exists.")
+        return
+
+    # Load the results
+    df = pd.read_excel(input_file)
+    analysis_results = df[['Turbine', 'Year']].copy()
+
+    # --- ERROR CALCULATION ---
+    # We use the original columns to get the data, but store them with your requested names
+    # Column mapping based on your Excel structure (True, Method, True, Method...)
+    mapping = [
+        (2, 3, 'DPC'),
+        (4, 5, 'LPC'),
+        (6, 7, 'Primary WS reference'),
+        (8, 9, 'Secondary WS reference'),
+        (10, 11, 'Primary power reference'),
+        (12, 13, 'Secondary power reference')
+    ]
+
+    for true_idx, method_idx, new_name in mapping:
+        try:
+            true_col = df.columns[true_idx]
+            method_col = df.columns[method_idx]
+            
+            # Create columns using the NEW names immediately
+            err_col = f"Error_{new_name}"
+            abs_col = f"Abs_Error_{new_name}"
+            
+            analysis_results[err_col] = df[method_col] - df[true_col]
+            analysis_results[abs_col] = analysis_results[err_col].abs()
+        except IndexError:
+            continue
+
+    # --- SUMMARY STATISTICS ---
+    summary_data = []
+    # Loop through the exact names we just created
+    for _, _, new_name in mapping:
+        err_col = f"Error_{new_name}"
+        abs_col = f"Abs_Error_{new_name}"
+        
+        if err_col not in analysis_results.columns:
+            continue
+
+        # Aggregate statistics per method
+        yearly_sums = analysis_results.groupby('Year')[err_col].sum()
+        avg_yearly_bias = yearly_sums.mean()
+        mean_abs_err = analysis_results[abs_col].mean()
+        total_abs_err = analysis_results[abs_col].sum()
+        
+        summary_data.append({
+            'Method': new_name, # This is 'DPC', 'LPC', etc.
+            'Avg_Annual_Raw_Bias': avg_yearly_bias,
+            'Total_Abs_Error': total_abs_err,
+            'Mean_Abs_Error (MAE)': mean_abs_err
+        })
+    
+    df_summary = pd.DataFrame(summary_data)
+
+    # --- EXPORT TO EXCEL ---
+    with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+        analysis_results.to_excel(writer, sheet_name='Detailed_Variance', index=False)
+        df_summary.to_excel(writer, sheet_name='Performance_Summary', index=False)
+
+    # --- VISUALIZATION ---
+    sns.set_theme(style="whitegrid")
+    
+    # List of names in the exact order you want them on the x-axis
+    target_order = [m[2] for m in mapping]
+
+    metrics = [
+        ('Avg_Annual_Raw_Bias', 'Average Annual Raw Bias (%)', '#2E75B6', 'PBA_Bias.png', 'PBA Average Annual Bias (%)'),
+        ('Total_Abs_Error', 'Total Absolute Error (%)', '#C00000', 'PBA_TotalError.png', 'Total Error (%)'),
+        ('Mean_Abs_Error (MAE)', 'Mean Absolute Error (MAE) (%)', '#70AD47', 'PBA_MAE.png', 'PBA Average MAE (%)')
+    ]
+
+    for col, title, color, filename, y_label in metrics:
+        plt.figure(figsize=(10, 6))
+        
+        # Plotting the 'Method' column which now contains ONLY your requested strings
+        sns.barplot(
+            data=df_summary, 
+            x='Method', 
+            y=col, 
+            hue='Method',
+            order=target_order, # Forces the X-axis to use your specific names in order
+            palette=[color] * len(df_summary),
+            legend=False,
+            edgecolor='black'
+        )
+        
+        plt.title(title, fontweight='bold', fontsize=16)
+        plt.ylabel(y_label, fontsize=14)
+        plt.xlabel('Approach', fontsize=14)
+        
+        plt.xticks(rotation=45, ha='right')
+        
+        if 'Bias' in title:
+            plt.axhline(0, color='black', linewidth=1.5)
+
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"Generated Figure: {filename}")
+        plt.close() 
+
+    print(f"\nAnalysis Complete. The X-axis labels are now: {target_order}")
+
+if __name__ == "__main__":
+    main()
