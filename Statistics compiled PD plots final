@@ -1,0 +1,117 @@
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# --- 1. CONFIGURATION ---
+input_file = 'method_Stats_calculator(heiarachy).xlsx'
+output_file = 'stats_compiled(heiarachy).xlsx'
+
+methods = [
+    '1_Default_PC', '2_Learned_PC', '3_Primary_WS_Ref',
+    '4_Farm_WS_Ref', '5_Primary_kW_Ref', '6_Farm_kW_Ref'
+]
+
+metrics_to_process = ['R2', 'MAE', 'RMSE', 'StdDev']
+
+# --- 2. PERCENTAGE PLOTTING FUNCTION ---
+def plot_percentage_difference(df_stats):
+    # Filter for OFF state
+    plot_df = df_stats[df_stats['State'].str.strip().str.upper() == 'OFF'].copy()
+    
+    if plot_df.empty:
+        print("Error: No 'OFF' data found for plotting.")
+        return
+
+    # These are the 4 metrics we will process independently
+    metrics = ['R2', 'MAE', 'RMSE', 'StdDev']
+    pct_cols = []
+    
+    for metric in metrics:
+        col_name = f'{metric}_Value'
+        pct_name = f'{metric}_%_Diff'
+        pct_cols.append(pct_name)
+        
+        # --- ISOLATION LOGIC ---
+        # 1. Grab only the current metric data
+        series = plot_df[col_name].abs()
+        
+        # 2. Find the lowest value for THIS metric among the 6 methods
+        v_min = series.min()
+        
+        # 3. Handle near-zero baseline to prevent infinite percentages
+        # If the minimum is essentially zero, use the mean of the methods as a fallback denominator
+        denom = v_min if v_min > 1e-6 else (series.mean() if series.mean() > 0 else 1)
+        
+        # 4. Calculate Percentage Difference from the lowest value
+        # This will result in 0% for the lowest method and positive % for others
+        plot_df[pct_name] = ((series - v_min) / denom) * 100
+
+    # Reshape for Seaborn plotting
+    df_melted = plot_df.melt(id_vars='Method', value_vars=pct_cols, 
+                             var_name='Metric', value_name='Pct_Diff')
+    df_melted['Metric'] = df_melted['Metric'].str.replace('_%_Diff', '')
+
+    # --- RENDER CHART ---
+    plt.figure(figsize=(15, 8))
+    sns.set_theme(style="whitegrid")
+    
+    ax = sns.barplot(data=df_melted, x='Method', y='Pct_Diff', hue='Metric', palette='viridis')
+
+    plt.title('Performance Comparison: % Increase Relative to Metric Minimum (OFF State)', 
+              fontweight='bold', fontsize=14)
+    plt.ylabel('Percentage Difference from Minimum (%)', fontsize=12)
+    plt.xlabel('Method', fontsize=12)
+    plt.xticks(rotation=25, ha='right')
+    plt.legend(title='Metric (Minimum = 0%)', bbox_to_anchor=(1.02, 1), loc='upper left')
+
+    # Add numeric labels on top of bars
+    for p in ax.patches:
+        height = p.get_height()
+        if height > 0.05: # Only label bars that are visible
+            ax.annotate(f'{height:.1f}%', 
+                        (p.get_x() + p.get_width() / 2., height), 
+                        ha='center', va='center', fontsize=9, xytext=(0, 7), 
+                        textcoords='offset points', fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig("Final_Independent_Metric_Comparison.png", dpi=300)
+    print("Graph generated: All metrics calculated independently relative to their own minimums.")
+    plt.show(block=True) 
+
+# --- 3. MAIN COMPILATION LOGIC ---
+def main():
+    if not os.path.exists(input_file):
+        print(f"Error: {input_file} not found.")
+        return
+
+    df = pd.read_excel(input_file, sheet_name='Summary_Report')
+    fleet_summary = []
+    
+    for i, method_name in enumerate(methods):
+        on_base_idx = 1 + (i * 12)
+        off_base_idx = 7 + (i * 12)
+        
+        for state, base_idx in [('ON', on_base_idx), ('OFF', off_base_idx)]:
+            stats_row = {'Method': method_name, 'State': state}
+            for m_idx, metric in enumerate(metrics_to_process):
+                col_idx = base_idx + m_idx
+                data = df.iloc[:, col_idx].dropna()
+                if not data.empty:
+                    # Capture the mean performance of the fleet for this method/state
+                    stats_row[f'{metric}_Value'] = data.mean()
+                    stats_row[f'{metric}_StdDev'] = data.std()
+            fleet_summary.append(stats_row)
+
+    df_stats = pd.DataFrame(fleet_summary)
+    
+    # Save the summarized Excel
+    with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+        df_stats.to_excel(writer, index=False)
+
+    # Run the visualization
+    plot_percentage_difference(df_stats)
+
+if __name__ == "__main__":
+    main()
